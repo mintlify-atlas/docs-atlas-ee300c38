@@ -1,0 +1,205 @@
+---
+title: "Configuration"
+description: "Full reference for AnalogAuthConfig, session storage drivers, user data callbacks, and environment variable setup."
+---
+
+Configuration is passed as an `AnalogAuthConfig` object to `useAnalogAuth()` inside your server middleware.
+
+## `AnalogAuthConfig` options
+
+| Option | Type | Required | Description |
+|---|---|---|---|
+| `issuer` | `string` | Yes | OAuth/OIDC provider base URL (e.g., `https://auth.example.com/realms/my-realm`). The package fetches `{issuer}/.well-known/openid-configuration` and caches it for one hour. |
+| `clientId` | `string` | Yes | OAuth client ID registered with your provider. |
+| `clientSecret` | `string` | Yes | OAuth client secret. Never expose this to the browser. |
+| `callbackUri` | `string` | Yes | Callback URL registered with your provider. Must match exactly, including protocol and port. |
+| `scope` | `string` | Yes | OAuth scopes to request (e.g., `"openid profile email"`). |
+| `sessionStorage` | `SessionStorageConfig` | Yes | Session storage configuration. See [session storage](#session-storage) below. |
+| `audience` | `string` | No | API audience identifier. Required by some providers such as Auth0. |
+| `unprotectedRoutes` | `string[]` | No | Routes that bypass authentication checks. Supports exact matches and wildcard patterns. |
+| `whitelistFileTypes` | `string[]` | No | File extensions that bypass authentication (e.g., `['.css', '.js']`). Checked before route matching. |
+| `tokenRefreshApiKey` | `string` | No | API key for the `/api/auth/refresh-tokens` endpoint. Required to enable scheduled token refresh. |
+| `logoutUrl` | `string` | No | URL to redirect to after the OAuth provider logout. Defaults to provider behavior. |
+| `userHandler` | `UserHandler` | No | Callbacks to customize user data processing after authentication. |
+
+## Session storage
+
+Session storage is powered by `@analog-tools/session`, which wraps [unstorage](https://unstorage.unjs.io/drivers). You configure it using the `driver` property.
+
+```typescript
+sessionStorage: {
+  sessionSecret: 'your-secret-key',  // Used for HMAC-SHA256 cookie signing
+  ttl: 86400,                         // Session TTL in seconds (default: 24h)
+  prefix: 'auth-session',             // Optional key prefix in storage
+  driver: { ... },
+}
+```
+
+### `SessionStorageConfig` fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `sessionSecret` | `string` | Yes | Secret used to sign the session cookie with HMAC-SHA256. Use at least 32 random characters in production. |
+| `ttl` | `number` | No | Session time-to-live in seconds. Default: `86400` (24 hours). |
+| `prefix` | `string` | No | Key prefix for all session entries in the storage backend. |
+| `driver` | `DriverOptions` | Yes | Storage driver configuration. |
+
+### Driver examples
+
+<CodeGroup>
+
+```typescript Redis (URL)
+driver: {
+  type: 'redis',
+  options: {
+    url: 'redis://localhost:6379',
+  },
+}
+```
+
+```typescript Redis (host/port)
+driver: {
+  type: 'redis',
+  options: {
+    host: 'localhost',
+    port: 6379,
+    password: 'your-password',
+    db: 0,
+  },
+}
+```
+
+```typescript Cloudflare KV
+driver: {
+  type: 'cloudflare-kv-binding',
+  options: {
+    binding: 'MY_KV_NAMESPACE',
+  },
+}
+```
+
+```typescript Filesystem (development only)
+driver: {
+  type: 'fs',
+  options: {
+    base: './.sessions',
+  },
+}
+```
+
+</CodeGroup>
+
+Any [unstorage driver](https://unstorage.unjs.io/drivers) can be used here. See `@analog-tools/session` for the full list.
+
+<Warning>
+  Memory storage (`type: 'memory'`) is currently non-functional. Use Redis,
+  Cloudflare KV, or filesystem instead. In production, always use a persistent
+  driver — filesystem is not suitable for multi-instance deployments.
+</Warning>
+
+## User data handling
+
+The optional `userHandler` object lets you customize what gets stored in the session after a successful login.
+
+```typescript
+userHandler: {
+  // Called after token exchange — persist the user to your database
+  createOrUpdateUser: async (userInfo) => {
+    const user = await db.users.upsert({
+      where: { sub: userInfo.sub },
+      update: { lastLogin: new Date() },
+      create: { sub: userInfo.sub, name: userInfo.name, email: userInfo.email },
+    });
+    return user;  // This object is stored as session.user
+  },
+
+  // Called when reading the user from the session — transform for your app
+  mapUserToLocal: (userInfo) => ({
+    id: userInfo.sub,
+    name: userInfo.name,
+    email: userInfo.email,
+    roles: userInfo.realm_access?.roles || [],
+  }),
+}
+```
+
+### `UserHandler` callbacks
+
+| Callback | Signature | Description |
+|---|---|---|
+| `createOrUpdateUser` | `(userInfo: T) => Promise<any>` | Called immediately after the token exchange. Use this to upsert the user in your database. The return value is stored as `session.user`. |
+| `mapUserToLocal` | `(userInfo: T) => any` | Called each time the user is read from the session. Use this to reshape provider-specific data for your application. |
+
+## `whitelistFileTypes`
+
+Use `whitelistFileTypes` to skip authentication checks for static asset requests. This check runs before route matching, so it is efficient for high-traffic static requests.
+
+```typescript
+whitelistFileTypes: ['.css', '.js', '.png', '.svg', '.ico', '.woff2', '.jpg']
+```
+
+Extensions are normalized: case-insensitive, and the leading dot is optional.
+
+## Vite configuration
+
+Add the package to `ssr.noExternal` so Vite bundles it for SSR instead of treating it as an external:
+
+```typescript
+// vite.config.ts
+import analog from '@analogjs/platform';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  ssr: {
+    noExternal: ['@analog-tools/**'],
+  },
+});
+```
+
+## Environment variables
+
+The recommended pattern is to read all secrets from environment variables and never hard-code them:
+
+```bash
+# .env
+AUTH_ISSUER=https://auth.example.com/realms/my-realm
+AUTH_CLIENT_ID=my-app
+AUTH_CLIENT_SECRET=super-secret-value
+AUTH_CALLBACK_URL=https://my-app.com/api/auth/callback
+SESSION_SECRET=at-least-32-random-characters-here
+REDIS_URL=redis://localhost:6379
+TOKEN_REFRESH_API_KEY=another-strong-random-key
+```
+
+```typescript
+// src/server/middleware/auth.ts
+const authConfig: AnalogAuthConfig = {
+  issuer: process.env['AUTH_ISSUER'] || '',
+  clientId: process.env['AUTH_CLIENT_ID'] || '',
+  clientSecret: process.env['AUTH_CLIENT_SECRET'] || '',
+  callbackUri: process.env['AUTH_CALLBACK_URL'] || '',
+  scope: 'openid profile email',
+  tokenRefreshApiKey: process.env['TOKEN_REFRESH_API_KEY'],
+  sessionStorage: {
+    sessionSecret: process.env['SESSION_SECRET'] || '',
+    ttl: 86400,
+    driver: {
+      type: 'redis',
+      options: { url: process.env['REDIS_URL'] || 'redis://localhost:6379' },
+    },
+  },
+};
+```
+
+## Production checklist
+
+<Note>
+  The following items are required for a secure production deployment.
+</Note>
+
+- Set `NODE_ENV=production` to enable secure cookie defaults (`secure`, `httpOnly`, `sameSite: 'lax'`).
+- Use a strong random `sessionSecret` — at least 32 characters.
+- Use a persistent session storage driver (Redis or Cloudflare KV) — not memory or filesystem.
+- Configure `tokenRefreshApiKey` and set up a CRON job for scheduled token refresh.
+- Serve the application over HTTPS (`secure` cookies require it).
+- Add rate limiting to auth endpoints at the infrastructure level.

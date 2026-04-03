@@ -1,0 +1,384 @@
+---
+title: "@analog-tools/session"
+description: "Session management for H3-based applications with HMAC-signed cookies and pluggable unstorage backends."
+---
+
+## Overview
+
+`@analog-tools/session` provides a functional API for session management in AnalogJS, Nitro, and H3 applications. Sessions are identified by HMAC-SHA256 signed cookies; session data is stored server-side using any [unstorage](https://unstorage.unjs.io) driver.
+
+```typescript
+import { useSession, getSession, updateSession, createUnstorageStore } from '@analog-tools/session';
+
+const store = await createUnstorageStore({
+  type: 'redis',
+  options: { url: 'redis://localhost:6379' },
+});
+
+export default defineEventHandler(async (event) => {
+  await useSession(event, { store, secret: process.env['SESSION_SECRET']!, maxAge: 86400 });
+
+  const session = getSession(event);
+  await updateSession(event, (data) => ({ visits: ((data['visits'] as number) || 0) + 1 }));
+
+  return { visits: getSession(event)?.['visits'] || 0 };
+});
+```
+
+---
+
+## Functions
+
+### `useSession(event, config)`
+
+Initializes a session for an H3 event. Must be called before any other session function within the same request handler.
+
+- Reads the session cookie, verifies the HMAC-SHA256 signature, and loads data from the store.
+- If no valid session exists, generates a new session ID (21-character nanoid, 126 bits of entropy), sets a signed cookie, and persists initial data.
+- Stores the session config in the event context so `updateSession`, `destroySession`, and `regenerateSession` can access it without re-configuration.
+
+<ParamField path="event" type="H3Event" required>
+  The H3 event from the current request handler.
+</ParamField>
+
+<ParamField path="config" type="SessionConfig<T>" required>
+  Session configuration. See [SessionConfig](#sessionconfig).
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+**Throws:** `SessionError` with code `COOKIE_ERROR`, `STORAGE_ERROR`, or `CRYPTO_ERROR` on failure.
+
+```typescript
+await useSession(event, {
+  store,
+  secret: 'your-secret-key',
+  name: 'my-app-session',
+  maxAge: 3600,
+  cookie: { secure: true, httpOnly: true, sameSite: 'strict' },
+  generate: () => ({ createdAt: Date.now() }),
+});
+```
+
+---
+
+### `getSession<T>(event)`
+
+Returns the current session data from the event context. Synchronous — does not hit the storage backend.
+
+<ParamField path="event" type="H3Event" required>
+  The H3 event. Must have had `useSession` called earlier in the same request.
+</ParamField>
+
+**Returns:** `T | null` — the typed session data, or `null` if no session has been initialized.
+
+```typescript
+interface UserSession {
+  userId?: string;
+  roles?: string[];
+}
+
+const session = getSession<UserSession>(event);
+if (session?.userId) {
+  // session is typed as UserSession
+}
+```
+
+---
+
+### `updateSession<T>(event, updater)`
+
+Applies partial updates to session data and persists the result to the store. Updates are shallow-merged with the existing session data.
+
+<ParamField path="event" type="H3Event" required>
+  The H3 event. Must have had `useSession` called earlier.
+</ParamField>
+
+<ParamField path="updater" type="(data: T) => Partial<T>" required>
+  A function that receives the current session data and returns a partial object to merge.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+**Throws:** `SessionError` with code `INVALID_SESSION` if no active session exists.
+
+```typescript
+await updateSession<UserSession>(event, (current) => ({
+  lastActivity: Date.now(),
+  loginCount: (current.loginCount || 0) + 1,
+}));
+```
+
+---
+
+### `destroySession(event)`
+
+Removes the session from the store, clears the event context, and expires the cookie immediately. Safe to call when no session exists — returns without throwing.
+
+<ParamField path="event" type="H3Event" required>
+  The H3 event.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+**Throws:** `SessionError` with code `STORAGE_ERROR` if the store removal fails.
+
+```typescript
+await destroySession(event);
+```
+
+---
+
+### `regenerateSession<T>(event)`
+
+Generates a new session ID while preserving existing session data. The old session is removed from the store and the cookie is updated with the new signed ID. Use this after privilege escalation (e.g., successful login) to prevent session fixation attacks.
+
+<ParamField path="event" type="H3Event" required>
+  The H3 event. Must have had `useSession` called earlier.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+**Throws:** `SessionError` with code `INVALID_SESSION` if no active session exists, or `STORAGE_ERROR` if the store operation fails.
+
+```typescript
+// After successful login
+await regenerateSession(event);
+await updateSession(event, () => ({ userId: user.id }));
+```
+
+---
+
+### `createUnstorageStore<T>(options)`
+
+Creates an unstorage `Storage<T>` instance by dynamically importing the specified driver. TypeScript enforces that `options` matches the selected `type` via the `DriverOptions` discriminated union.
+
+<ParamField path="options" type="DriverOptions" required>
+  Driver configuration. The `type` field selects the driver; `options` must match that driver's configuration type.
+</ParamField>
+
+**Returns:** `Promise<Storage<T>>`
+
+```typescript
+// Redis
+const store = await createUnstorageStore({
+  type: 'redis',
+  options: { url: 'redis://localhost:6379' },
+});
+
+// Cloudflare KV
+const kvStore = await createUnstorageStore({
+  type: 'cloudflare-kv-binding',
+  options: { binding: 'MY_KV_NAMESPACE' },
+});
+
+// File system (development)
+const fsStore = await createUnstorageStore({
+  type: 'fs',
+  options: { base: './.sessions' },
+});
+
+// Memory (testing only)
+const memStore = await createUnstorageStore({ type: 'memory' });
+```
+
+---
+
+### `signCookie(value, secret)`
+
+Low-level utility. Signs a cookie value using HMAC-SHA256. Returns the format `s:value.signature`. Requires the Web Crypto API (`crypto.subtle`).
+
+<ParamField path="value" type="string" required>
+  The raw cookie value to sign.
+</ParamField>
+
+<ParamField path="secret" type="string" required>
+  The signing secret.
+</ParamField>
+
+**Returns:** `Promise<string>` — the signed cookie string in `s:value.signature` format.
+
+```typescript
+const signed = await signCookie('session-id-123', 'my-secret');
+// Returns: "s:session-id-123.HmacSignature..."
+```
+
+<Note>
+  You typically do not need this directly — `useSession` handles signing internally.
+</Note>
+
+---
+
+### `unsignCookie(signed, secrets)`
+
+Low-level utility. Verifies the HMAC-SHA256 signature on a cookie and returns the original value. Tries each secret in order to support key rotation.
+
+<ParamField path="signed" type="string" required>
+  A previously signed cookie string in `s:value.signature` format.
+</ParamField>
+
+<ParamField path="secrets" type="string[]" required>
+  Array of secrets to try. The first secret is the current key; additional entries are for rotation.
+</ParamField>
+
+**Returns:** `Promise<string | null>` — the original value if any secret matches, or `null` if the signature is invalid.
+
+```typescript
+const value = await unsignCookie(signed, ['current-secret', 'old-secret']);
+// Returns 'session-id-123' or null if invalid
+```
+
+---
+
+## Types
+
+### `SessionConfig`
+
+```typescript
+interface SessionConfig<T extends SessionData = SessionData> {
+  store: Storage<T>;
+  secret: string | string[];
+  name?: string;
+  maxAge?: number;
+  cookie?: CookieOptions;
+  generate?: () => T;
+}
+```
+
+<ResponseField name="store" type="Storage<T>" required>
+  An unstorage `Storage<T>` instance. Create one with `createUnstorageStore()`.
+</ResponseField>
+
+<ResponseField name="secret" type="string | string[]" required>
+  Secret(s) for HMAC-SHA256 cookie signing. When an array, the first element signs new cookies; all elements are tried when verifying existing ones. This enables zero-downtime secret rotation.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Cookie name. Default: `'connect.sid'`
+</ResponseField>
+
+<ResponseField name="maxAge" type="number">
+  Session TTL in seconds. Controls the cookie `Max-Age` attribute. Default: `86400` (24 hours).
+
+  Note: This controls cookie lifetime, not storage expiry. Use a driver with native TTL support (Redis `EX`, Cloudflare KV `expirationTtl`) for automatic storage cleanup.
+</ResponseField>
+
+<ResponseField name="cookie" type="CookieOptions">
+  Cookie attribute overrides. See [CookieOptions](#cookieoptions).
+</ResponseField>
+
+<ResponseField name="generate" type="() => T">
+  Factory function called to create initial session data for new sessions.
+</ResponseField>
+
+---
+
+### `CookieOptions`
+
+<ResponseField name="domain" type="string">
+  Cookie `Domain` attribute.
+</ResponseField>
+
+<ResponseField name="path" type="string">
+  Cookie `Path` attribute. Default: `'/'`
+</ResponseField>
+
+<ResponseField name="secure" type="boolean">
+  Cookie `Secure` flag. Default: `false`. Set to `true` in production (requires HTTPS).
+</ResponseField>
+
+<ResponseField name="httpOnly" type="boolean">
+  Cookie `HttpOnly` flag — prevents client-side JavaScript access. Default: `true`.
+</ResponseField>
+
+<ResponseField name="sameSite" type="boolean | 'lax' | 'strict' | 'none'">
+  Cookie `SameSite` attribute. Default: `'lax'`.
+</ResponseField>
+
+---
+
+### `SessionError`
+
+Errors thrown by session operations have a `code` property for programmatic handling:
+
+<ResponseField name="code" type="string" required>
+  One of the following error codes:
+
+  | Code | When thrown |
+  |------|------------|
+  | `COOKIE_ERROR` | Failed to sign or set the session cookie |
+  | `INVALID_SESSION` | `updateSession` or `regenerateSession` called without prior `useSession` |
+  | `CRYPTO_ERROR` | Unexpected error during session initialization |
+  | `STORAGE_ERROR` | Failed to read, write, or delete from the store |
+  | `EXPIRED_SESSION` | Session cookie is valid but data no longer exists in the store |
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  Human-readable description of the error.
+</ResponseField>
+
+<ResponseField name="details" type="Record<string, unknown>">
+  Optional additional context (e.g., the underlying storage error).
+</ResponseField>
+
+```typescript
+try {
+  await useSession(event, sessionConfig);
+} catch (err) {
+  const sessionErr = err as Error & { code?: string };
+  if (sessionErr.code === 'STORAGE_ERROR') {
+    throw createError({ statusCode: 503, statusMessage: 'Session storage unavailable' });
+  }
+  throw createError({ statusCode: 500, statusMessage: 'Session initialization failed' });
+}
+```
+
+---
+
+### `DriverOptions`
+
+A discriminated union derived from unstorage's `BuiltinDriverOptions`. TypeScript enforces that `options` matches the selected `type`.
+
+```typescript
+type DriverOptions =
+  | { type: 'redis'; options: RedisOptions }
+  | { type: 'cloudflare-kv-binding'; options: CloudflareKVOptions }
+  | { type: 'fs'; options: FSOptions }
+  | { type: 'http'; options: HTTPOptions }
+  | { type: 'memory' }
+  | // ... all unstorage built-in drivers
+```
+
+Common driver types:
+
+| `type` | Use Case |
+|--------|----------|
+| `'redis'` | Production — Redis server |
+| `'cloudflare-kv-binding'` | Cloudflare Workers with KV namespace |
+| `'fs'` | Local development with file-based persistence |
+| `'memory'` | Unit tests only (has known issues) |
+| `'http'` | Remote storage over HTTP |
+
+Additional drivers (MongoDB, Vercel KV, Azure, Planetscale, etc.) are available from unstorage.
+
+---
+
+## Secret Rotation
+
+Rotate session secrets without invalidating existing sessions:
+
+```typescript
+// Step 1: Add new secret as the first element
+const config = {
+  store,
+  secret: ['new-secret-2025', 'old-secret-2024'],
+  // New sessions signed with 'new-secret-2025'
+  // Existing cookies signed with 'old-secret-2024' still validate
+};
+
+// Step 2: After all old sessions have expired, remove old secret
+const configAfterRotation = {
+  store,
+  secret: 'new-secret-2025',
+};
+```

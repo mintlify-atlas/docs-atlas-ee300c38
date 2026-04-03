@@ -1,80 +1,309 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Install AnalogTools and add OAuth 2.0 authentication to your AnalogJS application."
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+- An existing [AnalogJS](https://analogjs.org) application
+- An OAuth 2.0 / OIDC provider (Keycloak, Auth0, Google, etc.)
+- Node.js 18 or later
 
-### Step 1: Set up your local environment
+## Choose your setup path
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Tabs>
+  <Tab title="Nx generator (recommended)">
+    If your AnalogJS app lives in an Nx workspace, the `init-auth` generator wires up everything automatically.
 
-### Step 2: Deploy your changes
+    <Steps>
+      <Step title="Install the generator">
+        ```bash
+        npm install -D @analog-tools/generator
+        ```
+      </Step>
+      <Step title="Run the init-auth generator">
+        Replace `my-app` with your Nx application project name:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+        ```bash
+        npx nx generate @analog-tools/generator:init-auth --project=my-app
+        ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+        The generator performs four operations:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+        1. Creates `src/auth.config.ts` with OAuth/OIDC provider configuration
+        2. Creates `src/server/middleware/auth.ts` with the H3 middleware
+        3. Updates `src/app/app.config.ts` to add `provideAuthClient()` and `authInterceptor`
+        4. Updates `vite.config.ts` to add `@analog-tools/auth` to `ssr.noExternal`
 
-### Step 3: Go live
+        It also installs `@analog-tools/auth`, `@analog-tools/inject`, `@analog-tools/logger`, and `@analog-tools/session` if they are not already present.
+      </Step>
+      <Step title="Set environment variables">
+        Create a `.env` file in your project root (or set these in your deployment environment):
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+        ```env
+        AUTH_ISSUER=https://your-auth-provider.com
+        AUTH_CLIENT_ID=your-client-id
+        AUTH_CLIENT_SECRET=your-client-secret
+        AUTH_AUDIENCE=your-api-audience
+        AUTH_SCOPE=openid profile email
+        AUTH_CALLBACK_URL=http://localhost:4200/api/auth/callback
+        REDIS_URL=redis://localhost:6379
+        SESSION_SECRET=your-secure-random-secret-at-least-32-chars
+        ```
+      </Step>
+      <Step title="Start Redis">
+        The generator configures Redis as the default session storage. Start a Redis instance:
+
+        <Tabs>
+          <Tab title="Docker">
+            ```bash
+            docker run -d -p 6379:6379 redis:alpine
+            ```
+          </Tab>
+          <Tab title="macOS">
+            ```bash
+            brew install redis && brew services start redis
+            ```
+          </Tab>
+          <Tab title="Ubuntu/Debian">
+            ```bash
+            sudo apt-get install redis-server && sudo systemctl start redis
+            ```
+          </Tab>
+        </Tabs>
+      </Step>
+      <Step title="Register your callback URL">
+        In your OAuth provider's settings, register the callback URL exactly as set in `AUTH_CALLBACK_URL`. For local development this is `http://localhost:4200/api/auth/callback`.
+      </Step>
+      <Step title="Start the app">
+        ```bash
+        npx nx serve my-app
+        ```
+
+        Navigate to your app. All routes are protected by default. Visit `/api/auth/login` to trigger the OAuth flow.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Manual setup">
+    Install packages individually and wire them up yourself.
+
+    <Steps>
+      <Step title="Install packages">
+        ```bash
+        npm install @analog-tools/auth @analog-tools/session @analog-tools/inject @analog-tools/logger
+        npm install h3 uncrypto
+        ```
+
+        For the Angular client integration:
+
+        ```bash
+        npm install @analogjs/router @angular/core @angular/common @angular/router rxjs
+        ```
+      </Step>
+      <Step title="Create the auth middleware">
+        Create `src/server/middleware/auth.ts`. This file runs on every request and registers all built-in auth routes:
+
+        ```typescript
+        // src/server/middleware/auth.ts
+        import { defineEventHandler, H3Event } from 'h3';
+        import { useAnalogAuth, AnalogAuthConfig } from '@analog-tools/auth';
+
+        const authConfig: AnalogAuthConfig = {
+          issuer: process.env['AUTH_ISSUER'] || '',
+          clientId: process.env['AUTH_CLIENT_ID'] || '',
+          clientSecret: process.env['AUTH_CLIENT_SECRET'] || '',
+          scope: 'openid profile email',
+          callbackUri: process.env['AUTH_CALLBACK_URL'] || 'http://localhost:3000/api/auth/callback',
+          unprotectedRoutes: [
+            '/',
+            '/api/public/*',
+          ],
+          whitelistFileTypes: ['.css', '.js', '.png', '.svg', '.ico', '.woff2'],
+          sessionStorage: {
+            sessionSecret: process.env['SESSION_SECRET'] || 'change-me-in-production',
+            ttl: 86400,
+            driver: {
+              type: 'redis',
+              options: {
+                url: process.env['REDIS_URL'] || 'redis://localhost:6379',
+              },
+            },
+          },
+        };
+
+        export default defineEventHandler(async (event: H3Event) => {
+          return useAnalogAuth(authConfig, event);
+        });
+        ```
+      </Step>
+      <Step title="Update Vite config">
+        Add `@analog-tools/auth` to `ssr.noExternal` so Vite bundles it for SSR:
+
+        ```typescript
+        // vite.config.ts
+        import analog from '@analogjs/platform';
+        import { defineConfig } from 'vite';
+
+        export default defineConfig({
+          ssr: {
+            noExternal: ['@analog-tools/**'],
+          },
+          plugins: [analog()],
+        });
+        ```
+      </Step>
+      <Step title="Set environment variables">
+        Create a `.env` file in your project root:
+
+        ```env
+        AUTH_ISSUER=https://your-auth-provider.com
+        AUTH_CLIENT_ID=your-client-id
+        AUTH_CLIENT_SECRET=your-client-secret
+        AUTH_CALLBACK_URL=http://localhost:3000/api/auth/callback
+        REDIS_URL=redis://localhost:6379
+        SESSION_SECRET=your-secure-random-secret-at-least-32-chars
+        ```
+      </Step>
+      <Step title="Configure the Angular app">
+        Update `src/app/app.config.ts` to add the auth client providers:
+
+        ```typescript
+        // src/app/app.config.ts
+        import { ApplicationConfig } from '@angular/core';
+        import { provideHttpClient, withInterceptors } from '@angular/common/http';
+        import { provideFileRouter } from '@analogjs/router';
+        import { provideAuthClient, authInterceptor } from '@analog-tools/auth/angular';
+
+        export const appConfig: ApplicationConfig = {
+          providers: [
+            provideFileRouter(),
+            provideHttpClient(withInterceptors([authInterceptor])),
+            provideAuthClient(),
+          ],
+        };
+        ```
+
+        The `authInterceptor` adds a `fetch: 'true'` header so the server returns 401 instead of redirecting on API requests, and it automatically redirects to `/api/auth/login` on 401 responses.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Built-in auth routes
+
+After setup, the middleware automatically registers these routes under `/api/auth/`:
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/api/auth/login` | GET | Redirects to your OAuth provider. Accepts `?redirect_uri=` for post-login redirect. |
+| `/api/auth/callback` | GET | Handles the provider callback and exchanges the code for tokens. |
+| `/api/auth/logout` | GET | Revokes tokens, clears the session, and redirects to provider logout. |
+| `/api/auth/authenticated` | GET | Returns `{ authenticated: boolean }`. Safe to call without a session. |
+| `/api/auth/user` | GET | Returns the authenticated user object. Requires a valid session. |
+
+## Use AuthService in a component
+
+`AuthService` provides Angular signals for reactive authentication state:
+
+```typescript
+import { Component, inject } from '@angular/core';
+import { AuthService } from '@analog-tools/auth/angular';
+
+@Component({
+  standalone: true,
+  template: `
+    @if (auth.isAuthenticated()) {
+      <p>Hello, {{ auth.user()?.fullName }}</p>
+      <button (click)="auth.logout()">Logout</button>
+    } @else {
+      <button (click)="auth.login()">Login</button>
+    }
+  `,
+})
+export default class HomePage {
+  auth = inject(AuthService);
+}
+```
+
+The `isAuthenticated()` signal polls `/api/auth/authenticated` every 5 minutes. The `user()` signal fetches from `/api/auth/user` when authenticated and maps provider-specific fields into a normalized `AuthUser` shape with `username`, `fullName`, `email`, `roles`, and more.
+
+## Protect routes with guards
+
+```typescript
+// Require authentication for a route
+import { authGuard } from '@analog-tools/auth/angular';
+
+export const routeMeta = {
+  canActivate: [authGuard],
+};
+```
+
+```typescript
+// Require specific roles
+import { roleGuard } from '@analog-tools/auth/angular';
+
+export const routeMeta = {
+  canActivate: [roleGuard],
+  data: {
+    roles: ['admin', 'editor'],
+  },
+};
+```
+
+The `authGuard` redirects to login if unauthenticated. The `roleGuard` redirects to `/access-denied` if the user lacks any of the required roles.
+
+## Configure unprotected routes
+
+By default, all routes require authentication. Add public routes to `unprotectedRoutes` in your auth config:
+
+```typescript
+unprotectedRoutes: [
+  '/',              // Exact match — home page is public
+  '/login',         // Exact match
+  '/api/public/*',  // Wildcard — matches /api/public/anything
+  '/docs/*',        // Wildcard — matches /docs/getting-started, /docs/api, etc.
+],
+```
+
+For static assets, use `whitelistFileTypes` to skip auth by file extension — this is more efficient than listing every asset path:
+
+```typescript
+whitelistFileTypes: ['.css', '.js', '.png', '.svg', '.ico', '.woff2'],
+```
+
+<Note>
+  Wildcard patterns (`/api/public/*`) require actual path content after the prefix. `/api/public/` alone does not match — there must be a path segment after the slash.
+</Note>
+
+## Production checklist
+
+Before deploying to production:
+
+- Set `NODE_ENV=production` to enable `secure`, `httpOnly`, and `sameSite: 'lax'` cookie defaults
+- Use a `SESSION_SECRET` of at least 32 random characters
+- Switch from file-system or in-memory storage to Redis or Cloudflare KV
+- Set up HTTPS — required for secure cookies
+- Register the production `AUTH_CALLBACK_URL` with your OAuth provider
+- Add rate limiting to `/api/auth/*` endpoints at your infrastructure layer
+
+<Tip>
+  To rotate your session secret without invalidating existing sessions, pass an array to `sessionSecret`: `['new-secret', 'old-secret']`. New sessions are signed with the first secret; existing cookies signed with any secret in the array remain valid until they expire.
+</Tip>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Authentication reference" icon="shield-halved" href="/auth/overview">
+    Full configuration reference: session storage drivers, token refresh strategies, user data handling, and tRPC integration.
+  </Card>
+  <Card title="Session management" icon="cookie" href="/session/overview">
+    Use session storage independently — typed sessions, secret rotation, and all supported storage backends.
+  </Card>
+  <Card title="Nx generators" icon="wand-magic-sparkles" href="/generator/overview">
+    Scaffold AnalogJS libraries, API routes, and auth setup using Nx code generators.
+  </Card>
+  <Card title="Dependency injection" icon="syringe" href="/inject/overview">
+    Build injectable server-side services with the `@analog-tools/inject` DI system.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

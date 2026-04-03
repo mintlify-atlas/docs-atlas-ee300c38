@@ -1,0 +1,116 @@
+---
+title: "Introduction"
+description: "AnalogTools is a collection of npm packages that extend AnalogJS with production-ready authentication, session management, logging, and dependency injection."
+---
+
+## What is AnalogTools?
+
+AnalogTools is a set of utilities built on top of [AnalogJS](https://analogjs.org) — the fullstack meta-framework for Angular that runs on Vite and Nitro. While AnalogJS gives you file-based routing, server-side rendering, and API routes, it leaves authentication, session storage, and server-side services to you. AnalogTools fills that gap.
+
+The packages are designed to work together but can each be used independently. If you only need session management, install `@analog-tools/session`. If you want the full authentication stack, install `@analog-tools/auth` and let it pull in its dependencies.
+
+<Warning>
+  AnalogTools is in early development. Breaking changes may occur between minor versions. Pin to specific versions in production and review the changelog before upgrading.
+</Warning>
+
+## Package ecosystem
+
+<CardGroup cols={2}>
+  <Card title="@analog-tools/auth" icon="shield-halved" href="/auth/overview">
+    OAuth 2.0 and OpenID Connect authentication using the Backend-for-Frontend (BFF) pattern. Registers built-in login, callback, logout, and user routes. Handles token exchange, refresh, and revocation entirely on the server.
+  </Card>
+  <Card title="@analog-tools/session" icon="cookie" href="/session/overview">
+    Session management for H3-based servers with pluggable storage backends via [unstorage](https://unstorage.unjs.io). Supports Redis, Cloudflare KV, file system, and any other unstorage driver.
+  </Card>
+  <Card title="@analog-tools/inject" icon="syringe" href="/inject/overview">
+    A lightweight dependency injection system for AnalogJS server-side code. Uses symbol-based tokens and supports global singletons, scoped registries, async initialization, and lifecycle hooks.
+  </Card>
+  <Card title="@analog-tools/logger" icon="file-lines" href="/logger/overview">
+    Structured logging with context-based child loggers, log deduplication, error serialization, and pluggable formatters (ANSI console or JSON for log aggregation).
+  </Card>
+  <Card title="@analog-tools/generator" icon="wand-magic-sparkles" href="/generator/overview">
+    Nx code generators that scaffold AnalogJS libraries, API routes, and complete authentication setups with a single command.
+  </Card>
+</CardGroup>
+
+## The BFF authentication pattern
+
+`@analog-tools/auth` implements the **Backend-for-Frontend (BFF)** pattern for OAuth 2.0 and OIDC authentication. The key principle: **tokens never leave the server**.
+
+Here is what happens during a login flow:
+
+<Steps>
+  <Step title="Login redirect">
+    The user navigates to `/api/auth/login`. The server generates a CSRF state token, stores it in the session, and redirects the browser to your OAuth provider.
+  </Step>
+  <Step title="Provider authentication">
+    The user authenticates with your provider (Keycloak, Auth0, Google, etc.) and the provider redirects back to `/api/auth/callback` with an authorization code.
+  </Step>
+  <Step title="Token exchange">
+    The server verifies the CSRF state parameter, exchanges the authorization code for an access token, refresh token, and ID token, and stores all three in the server-side session.
+  </Step>
+  <Step title="Signed session cookie">
+    The browser receives only an HMAC-SHA256 signed session cookie. No tokens, no JWT payloads — just an opaque reference to the server-side session.
+  </Step>
+  <Step title="Subsequent requests">
+    On every request, the auth middleware reads the signed cookie, loads the session from storage, verifies the token, and refreshes it if needed — all before your route handler runs.
+  </Step>
+</Steps>
+
+This approach means your access tokens, refresh tokens, and ID tokens are never exposed to browser storage, never visible in network responses, and never accessible to client-side JavaScript.
+
+## Package dependency architecture
+
+The packages form a layered dependency graph:
+
+```
+@analog-tools/auth         (server-side auth middleware)
+    ├── @analog-tools/session   (session storage)
+    ├── @analog-tools/inject    (service registry DI)
+    └── @analog-tools/logger    (structured logging)
+
+@analog-tools/auth/angular (Angular client integration)
+    └── communicates with @analog-tools/auth routes
+
+@analog-tools/session
+    └── @analog-tools/inject
+
+@analog-tools/logger
+    └── @analog-tools/inject    (optional, for DI integration)
+```
+
+`@analog-tools/inject` is the foundation. It provides the service registry that `session`, `logger`, and `auth` use internally to manage singleton instances. You can use it directly in your own AnalogJS server code to build injectable services without Angular's DI system.
+
+`@analog-tools/session` sits above `inject` and provides the session lifecycle that `auth` relies on. You can use it standalone for any H3-based session management without the auth layer.
+
+`@analog-tools/auth` composes all three into a complete authentication system. It also ships an `@analog-tools/auth/angular` entry point with Angular services (`AuthService`, `authGuard`, `authInterceptor`) for the client side.
+
+`@analog-tools/generator` is a devDependency — it provides Nx generators to scaffold all of the above into your project without manual wiring.
+
+## Early development warning
+
+The project is actively evolving. What this means in practice:
+
+- **API surfaces may change** between minor versions, especially for `session` and `auth`
+- **The session storage configuration** changed significantly in v0.0.12 (from a `type`/`config` pattern to a `driver`-based approach)
+- **Memory storage** in `@analog-tools/session` has known issues — use Redis, Cloudflare KV, or file system instead
+- **Pin to specific versions** in production and test upgrades in a separate environment
+
+Check the [changelog](https://github.com/MrBacony/analog-tools/releases) before upgrading.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install the packages and have a working authentication setup in minutes.
+  </Card>
+  <Card title="Authentication" icon="shield-halved" href="/auth/overview">
+    Full reference for configuring OAuth providers, session storage, route protection, and token refresh.
+  </Card>
+  <Card title="Session management" icon="cookie" href="/session/overview">
+    Use session storage directly without the full auth layer.
+  </Card>
+  <Card title="Nx generator" icon="wand-magic-sparkles" href="/generator/overview">
+    Scaffold auth into an existing AnalogJS Nx project with one command.
+  </Card>
+</CardGroup>

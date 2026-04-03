@@ -1,0 +1,598 @@
+---
+title: "@analog-tools/inject"
+description: "Symbol-based dependency injection for AnalogJS and H3/Nitro server-side applications — no reflect-metadata required."
+---
+
+`@analog-tools/inject` provides a lightweight dependency injection system built for AnalogJS and H3/Nitro server-side applications. It uses symbol-based tokens (assigned via the `@Injectable()` decorator) that are **minification-safe** — class names in production builds will never affect service lookup.
+
+<CardGroup cols={2}>
+  <Card title="Global singletons" icon="globe">
+    Services are registered once and shared across all requests within the same server process.
+  </Card>
+  <Card title="Scoped registries" icon="boxes-stacked">
+    Isolated registries for test isolation, multi-tenant scenarios, and per-request services.
+  </Card>
+  <Card title="Async initialization" icon="bolt">
+    Async setup via `AsyncInjectableService` with deduplication of concurrent init calls.
+  </Card>
+  <Card title="Lifecycle hooks" icon="rotate">
+    `onDestroy()` hooks with aggregated error handling for graceful shutdown.
+  </Card>
+</CardGroup>
+
+## Installation
+
+```bash
+npm install @analog-tools/inject
+```
+
+<Note>
+  TypeScript decorators require `"target": "ES2015"` or later in `tsconfig.json`. No `emitDecoratorMetadata` or `reflect-metadata` is needed.
+</Note>
+
+## Quick start
+
+```typescript
+import { Injectable, inject, registerService } from '@analog-tools/inject';
+
+// 1. Mark class as injectable
+@Injectable()
+class DatabaseService {
+  query(sql: string) {
+    // ...
+  }
+}
+
+// 2. Register with constructor args (if any)
+registerService(DatabaseService);
+
+// 3. Inject anywhere
+const db = inject(DatabaseService);
+db.query('SELECT * FROM users');
+```
+
+## How it works
+
+1. Mark a class with `@Injectable()` — this creates a unique symbol token for that class.
+2. When you call `inject(MyService)`, it looks up the service by its symbol token.
+3. If no instance exists yet, one is created using the class constructor.
+4. The same instance is returned on all subsequent `inject()` calls within that scope.
+
+---
+
+## Defining injectable services
+
+Use the `@Injectable()` decorator to mark a class as injectable:
+
+```typescript
+import { Injectable, inject } from '@analog-tools/inject';
+
+@Injectable()
+class DatabaseService {
+  private pool: ConnectionPool;
+
+  constructor() {
+    this.pool = createPool({ /* ... */ });
+  }
+
+  async query(sql: string, params: unknown[] = []): Promise<unknown[]> {
+    return this.pool.execute(sql, params);
+  }
+}
+
+// First call creates the instance; subsequent calls return the same one
+const db = inject(DatabaseService);
+```
+
+## Registering services with constructor arguments
+
+When a service needs configuration at creation time, register it explicitly with `registerService()`:
+
+```typescript
+import { Injectable, registerService, inject } from '@analog-tools/inject';
+
+@Injectable()
+class CacheService {
+  constructor(
+    private readonly ttlSeconds: number,
+    private readonly prefix: string
+  ) {}
+
+  getKey(key: string): string {
+    return `${this.prefix}:${key}`;
+  }
+}
+
+// Register with constructor args before first use
+registerService(CacheService, 300, 'app');
+
+// Now inject anywhere -- returns the instance created above
+const cache = inject(CacheService);
+cache.getKey('session'); // "app:session"
+```
+
+<Note>
+  Registration is idempotent: calling `registerService()` again for an already-registered service is a no-op. The first registration wins.
+</Note>
+
+## Injecting dependencies within services
+
+Services can inject other services as instance properties:
+
+```typescript
+import { Injectable, inject } from '@analog-tools/inject';
+
+@Injectable()
+class UserRepository {
+  private db = inject(DatabaseService);
+
+  async findById(id: string) {
+    const rows = await this.db.query(
+      'SELECT * FROM users WHERE id = $1',
+      [id]
+    );
+    return rows[0];
+  }
+}
+
+@Injectable()
+class DatabaseService {
+  async query(sql: string, params: unknown[]): Promise<unknown[]> {
+    // implementation
+  }
+}
+```
+
+The dependency (`DatabaseService`) is resolved when `UserRepository` is first instantiated. If `DatabaseService` hasn't been registered yet, it will be auto-registered using its no-arg constructor.
+
+## Optional injection
+
+For services that might not be available, pass `{ required: false }`:
+
+```typescript
+const analytics = inject(AnalyticsService, { required: false });
+if (analytics) {
+  analytics.track('page_view');
+}
+```
+
+When `required` is `false` and the service is not registered (or was registered as undefined), `inject()` returns `undefined` instead of throwing.
+
+---
+
+## Async initialization
+
+For services that need asynchronous setup (connecting to databases, loading configuration, etc.), implement the `AsyncInjectableService` interface with an `initializeAsync()` method:
+
+```typescript
+import { Injectable, injectAsync, registerAsync } from '@analog-tools/inject';
+import type { AsyncInjectableService } from '@analog-tools/inject';
+
+@Injectable()
+class DatabaseService implements AsyncInjectableService {
+  private connection: Connection | null = null;
+
+  async initializeAsync(): Promise<void> {
+    this.connection = await createConnection({
+      host: 'localhost',
+      port: 5432,
+      database: 'myapp',
+    });
+  }
+
+  query(sql: string): Promise<unknown[]> {
+    if (!this.connection) {
+      throw new Error('Database not initialized');
+    }
+    return this.connection.query(sql);
+  }
+}
+```
+
+Use `registerAsync()` during application startup to eagerly initialize services:
+
+```typescript
+// Application startup
+await registerAsync(DatabaseService);
+
+// Services are now initialized and ready to use
+const db = inject(DatabaseService);
+await db.query('SELECT 1');
+```
+
+Or use `injectAsync()` on-demand to ensure initialization before use:
+
+```typescript
+const db = await injectAsync(DatabaseService);
+await db.query('SELECT * FROM users');
+```
+
+<Note>
+  **Key behaviors:**
+  - Services **without** `initializeAsync()` work fine with `injectAsync()` (no-op initialization).
+  - Initialization promises are **deduplicated** — concurrent calls to `injectAsync()` for the same service share a single initialization promise.
+  - Failed initialization attempts are **not cached** — subsequent calls will retry initialization.
+  - The sync `inject()` function does **not** await async initialization; use `injectAsync()` for async services.
+</Note>
+
+---
+
+## Lifecycle management
+
+For services managing external resources (database connections, file handles, timers, etc.), implement the `onDestroy()` hook to ensure proper cleanup:
+
+```typescript
+import { Injectable } from '@analog-tools/inject';
+import type { AsyncInjectableService } from '@analog-tools/inject';
+
+@Injectable()
+class DatabaseService implements AsyncInjectableService {
+  private connection: Connection | null = null;
+
+  async initializeAsync(): Promise<void> {
+    this.connection = await createConnection({
+      host: 'localhost',
+      database: 'myapp',
+    });
+  }
+
+  async onDestroy(): Promise<void> {
+    if (this.connection) {
+      await this.connection.close();
+      this.connection = null;
+    }
+  }
+
+  async query(sql: string): Promise<unknown[]> {
+    if (!this.connection) {
+      throw new Error('Database not initialized');
+    }
+    return this.connection.query(sql);
+  }
+}
+```
+
+### Destroying all services
+
+Use `destroyAllServicesAsync()` during application shutdown to invoke `onDestroy()` hooks and clean up resources:
+
+```typescript
+import { destroyAllServicesAsync } from '@analog-tools/inject';
+
+process.on('SIGTERM', async () => {
+  console.log('Shutting down gracefully...');
+  try {
+    await destroyAllServicesAsync();
+    console.log('All services cleaned up');
+    process.exit(0);
+  } catch (error) {
+    console.error('Cleanup failed:', error);
+    process.exit(1);
+  }
+});
+```
+
+### `AggregateDestructionError`
+
+If an `onDestroy()` hook fails, cleanup continues for other services and errors are aggregated into an `AggregateDestructionError`:
+
+```typescript
+import { AggregateDestructionError, destroyAllServicesAsync } from '@analog-tools/inject';
+
+try {
+  await destroyAllServicesAsync();
+} catch (error) {
+  if (error instanceof AggregateDestructionError) {
+    console.error(`Cleanup failed for ${error.failures.length} service(s):`);
+    error.failures.forEach((failure) => {
+      console.error(
+        `  ${failure.serviceName}: ${failure.error.message}`
+      );
+    });
+
+    // Check if a specific service failed
+    if (error.hasFailure('DatabaseService')) {
+      console.error('Database cleanup failed - may have connection leaks');
+    }
+  } else {
+    throw error;
+  }
+}
+```
+
+**Properties:**
+
+| Property / Method | Description |
+|---|---|
+| `failures` | `Array<{ serviceName: string; error: Error }>` — services that failed with their errors |
+| `getErrors()` | Get all underlying errors as an array |
+| `hasFailure(serviceName)` | Check if a specific service failed |
+
+---
+
+## Scoped injection
+
+For test isolation or multi-tenant scenarios, use scoped injection to create independent service registries.
+
+### Basic scoped usage
+
+```typescript
+import {
+  InjectionContext,
+  registerServiceScoped,
+  injectScoped,
+} from '@analog-tools/inject';
+
+// Create a named scope
+InjectionContext.createScope('my-scope');
+
+// Register and inject within scope
+registerServiceScoped(MyService, 'my-scope', 'config-value');
+const service = injectScoped(MyService, 'my-scope');
+
+// Cleanup when done
+InjectionContext.destroyScope('my-scope');
+```
+
+<Note>
+  Scoped resolution is **scope-only** — services do not inherit from parent or default scopes. Each scope has its own independent registry.
+</Note>
+
+### Test isolation example
+
+```typescript
+import { describe, it, expect, afterEach } from 'vitest';
+import {
+  InjectionContext,
+  Injectable,
+  registerServiceScoped,
+  injectScoped,
+  registerMockServiceScoped,
+  resetScopedInjections,
+} from '@analog-tools/inject';
+
+@Injectable()
+class DatabaseService {
+  constructor(private dbUrl: string) {}
+
+  async query(sql: string): Promise<unknown[]> {
+    // database implementation
+  }
+}
+
+@Injectable()
+class UserRepository {
+  constructor(private scope: string = 'default') {}
+
+  private get db() {
+    return injectScoped(DatabaseService, this.scope);
+  }
+
+  async findById(id: string) {
+    return this.db.query(`SELECT * FROM users WHERE id = '${id}'`);
+  }
+}
+
+describe('UserRepository with scope isolation', () => {
+  const TEST_SCOPE = 'user-repo-test';
+
+  afterEach(() => {
+    resetScopedInjections(TEST_SCOPE);
+  });
+
+  it('should handle missing users', () => {
+    InjectionContext.createScope(TEST_SCOPE);
+
+    const mockDb = { query: async () => [] };
+
+    registerMockServiceScoped(DatabaseService, mockDb, TEST_SCOPE);
+    registerServiceScoped(UserRepository, TEST_SCOPE, TEST_SCOPE);
+
+    const repo = injectScoped(UserRepository, TEST_SCOPE);
+    // ...test assertions...
+  });
+});
+```
+
+### Scoped API reference
+
+| Function | Description |
+|---|---|
+| `InjectionContext.createScope(name)` | Create a new named scope |
+| `InjectionContext.destroyScope(name)` | Destroy scope and cleanup all services |
+| `InjectionContext.destroyScopeAsync(scope)` | Destroy scope and invoke `onDestroy()` hooks for async services |
+| `InjectionContext.clearAll()` | Clear all scopes (useful in global test teardown) |
+| `InjectionContext.clearAllAsync()` | Destroy all scopes asynchronously, aggregating errors |
+| `InjectionContext.getActiveScopes()` | Get list of all active scope names |
+| `registerServiceScoped(token, scope, ...args)` | Register service in specific scope |
+| `injectScoped(token, scope, options?)` | Inject service from specific scope |
+| `registerServiceAsUndefinedScoped(token, scope)` | Register service as undefined in scope |
+| `registerMockServiceScoped(token, partial, scope)` | Register mock service in scope |
+| `resetScopedInjections(scope)` | Clear all services in a scope |
+
+---
+
+## Testing utilities
+
+`registerMockService` and `resetAllInjections` are available for test isolation with the global (default) scope:
+
+```typescript
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { Injectable, inject, registerMockService, resetAllInjections } from '@analog-tools/inject';
+
+@Injectable()
+class NotificationService {
+  send(userId: string, message: string): void {
+    // production implementation
+  }
+}
+
+@Injectable()
+class OrderService {
+  private notifications = inject(NotificationService);
+
+  placeOrder(userId: string, item: string): void {
+    // ... order logic ...
+    this.notifications.send(userId, `Order placed: ${item}`);
+  }
+}
+
+describe('OrderService', () => {
+  const mockNotifications = {
+    send: vi.fn(),
+  };
+
+  afterEach(() => {
+    resetAllInjections();
+    vi.clearAllMocks();
+  });
+
+  it('sends a notification when an order is placed', () => {
+    registerMockService(NotificationService, mockNotifications);
+
+    const orders = inject(OrderService);
+    orders.placeOrder('user-1', 'Widget');
+
+    expect(mockNotifications.send).toHaveBeenCalledWith(
+      'user-1',
+      'Order placed: Widget'
+    );
+  });
+});
+```
+
+---
+
+## Helper functions
+
+### `tryInject()`
+
+Attempts to inject a service, returning `undefined` if not available. A safer alternative to `inject(token, { required: false })` — never throws.
+
+```typescript
+const analytics = tryInject(AnalyticsService);
+if (analytics) {
+  analytics.track('event');
+}
+```
+
+### `hasService()`
+
+Checks if a service is registered in the global registry without attempting to create it. Returns `true` if the service is registered with a defined value, `false` otherwise. Never throws.
+
+```typescript
+if (hasService(DatabaseService)) {
+  const db = inject(DatabaseService);
+}
+```
+
+---
+
+## Usage in AnalogJS API routes
+
+In AnalogJS API routes (H3 event handlers), inject services directly in the event handler:
+
+```typescript
+// src/server/routes/api/users/[id].ts
+import { defineEventHandler, getRouterParam } from 'h3';
+import { Injectable, inject } from '@analog-tools/inject';
+
+@Injectable()
+class UserRepository {
+  async findById(id: string) {
+    // implementation
+  }
+}
+
+export default defineEventHandler(async (event) => {
+  const userId = getRouterParam(event, 'id');
+  const users = inject(UserRepository);
+
+  return users.findById(userId!);
+});
+```
+
+Since services use the default scope, the same instance is shared across all requests within the same server process.
+
+For multi-tenant applications, use scoped injection to provide isolated service instances per request:
+
+```typescript
+import { defineEventHandler } from 'h3';
+import { InjectionContext, registerServiceScoped, injectScoped, Injectable } from '@analog-tools/inject';
+
+@Injectable()
+class TenantService {
+  constructor(private tenantId: string) {}
+
+  async getData() {
+    // tenant-specific logic
+  }
+}
+
+export default defineEventHandler(async (event) => {
+  const tenantId = event.context.tenantId; // From auth middleware
+
+  if (!InjectionContext.getActiveScopes().includes(`tenant-${tenantId}`)) {
+    InjectionContext.createScope(`tenant-${tenantId}`);
+    registerServiceScoped(TenantService, `tenant-${tenantId}`, tenantId);
+  }
+
+  const tenant = injectScoped(TenantService, `tenant-${tenantId}`);
+  return tenant.getData();
+});
+```
+
+---
+
+## API reference
+
+### `inject<T>(token, options?)`
+
+Retrieves a service instance from the registry. Auto-registers the service (with no constructor args) if not already present.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `token` | `InjectionServiceClass<T>` | — | The service class (must have `@Injectable()`) |
+| `options.required` | `boolean` | `true` | Throw if service is not found |
+
+Throws `MissingServiceTokenError` if the class lacks `@Injectable()`, or `InjectionError` if `required` is `true` and the service resolves to `undefined`.
+
+### `registerService<T>(token, ...args)`
+
+Creates and registers a singleton instance with the given constructor arguments. No-op if the service is already registered with a defined value.
+
+### `injectAsync<T>(token, options?)`
+
+Retrieves and initializes an async service instance. Ensures `initializeAsync()` completes before returning. Concurrent calls return the same initialization promise.
+
+### `registerAsync<T>(token, ...args)`
+
+Registers and eagerly initializes a service during application startup. After this resolves, the service is fully initialized and accessible via `inject()` or `injectAsync()`.
+
+### `destroyAllServicesAsync()`
+
+Destroys all services in the global registry, invoking `onDestroy()` hooks. Throws `AggregateDestructionError` if one or more services fail during destruction.
+
+### `registerMockService<T>(token, partial)`
+
+Registers a partial object as the service instance. Intended for tests where you only need to stub specific methods.
+
+### `resetAllInjections()`
+
+Clears all entries from the service registry. Call this in `afterEach()` to isolate tests from each other.
+
+### `hasService<T>(token)`
+
+Returns `true` if the service is registered with a defined value, `false` otherwise. Never throws.
+
+### `tryInject<T>(token)`
+
+Attempts to inject a service, returning `undefined` if not available. Never throws.
+
+### Error types
+
+| Error | Description |
+|---|---|
+| `InjectionError` | Base error thrown when injection fails. Has `token` and optional `cause` properties. |
+| `MissingServiceTokenError` | Thrown when injecting a class not decorated with `@Injectable()`. |
+| `AggregateDestructionError` | Thrown by `destroyAllServicesAsync()` when one or more `onDestroy()` hooks fail. |

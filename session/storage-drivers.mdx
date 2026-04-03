@@ -1,0 +1,146 @@
+---
+title: "Storage drivers"
+description: "Configure Redis, Cloudflare KV, filesystem, and other unstorage backends for session persistence."
+---
+
+`@analog-tools/session` uses [unstorage](https://unstorage.unjs.io) for pluggable storage backends. The `createUnstorageStore` factory dynamically imports the specified driver and returns a typed `Storage` instance you pass to `useSession`.
+
+## `createUnstorageStore(options)`
+
+```typescript
+import { createUnstorageStore } from '@analog-tools/session';
+
+const store = await createUnstorageStore({
+  type: 'redis',
+  options: { url: 'redis://localhost:6379' },
+});
+```
+
+`createUnstorageStore` returns a `Promise<Storage<T>>`. Call it once at module level and reuse the store across all requests — do not create a new store per request.
+
+The `options` parameter is a discriminated union (`DriverOptions`) derived from unstorage's `BuiltinDriverOptions`. TypeScript enforces that the `options` object matches the selected driver `type` at compile time.
+
+## Supported drivers
+
+| Driver | `type` value | Best for |
+|---|---|---|
+| Redis | `'redis'` | Production deployments with a Redis instance |
+| Cloudflare KV | `'cloudflare-kv-binding'` | Cloudflare Workers and Pages with KV namespaces |
+| Filesystem | `'fs'` | Local development with file-based persistence |
+| Memory | `'memory'` | Unit tests only — has known issues in production |
+| HTTP | `'http'` | Remote storage accessed over HTTP |
+
+Additional drivers (MongoDB, Vercel KV, Planetscale, Azure, etc.) are available — see the [unstorage drivers documentation](https://unstorage.unjs.io/drivers).
+
+## Driver examples
+
+<CodeGroup>
+
+```typescript Redis
+import { createUnstorageStore } from '@analog-tools/session';
+
+const store = await createUnstorageStore({
+  type: 'redis',
+  options: { url: 'redis://localhost:6379' },
+});
+```
+
+```typescript Cloudflare KV
+import { createUnstorageStore } from '@analog-tools/session';
+
+const kvStore = await createUnstorageStore({
+  type: 'cloudflare-kv-binding',
+  options: { binding: 'MY_KV_NAMESPACE' },
+});
+```
+
+```typescript Filesystem
+import { createUnstorageStore } from '@analog-tools/session';
+
+// Development use only
+const fsStore = await createUnstorageStore({
+  type: 'fs',
+  options: { base: './.sessions' },
+});
+```
+
+```typescript Memory
+import { createUnstorageStore } from '@analog-tools/session';
+
+// Testing use only — has known issues
+const memStore = await createUnstorageStore({ type: 'memory' });
+```
+
+```typescript HTTP
+import { createUnstorageStore } from '@analog-tools/session';
+
+const httpStore = await createUnstorageStore({
+  type: 'http',
+  options: { base: 'https://my-storage-api.example.com' },
+});
+```
+
+</CodeGroup>
+
+## Type safety with `DriverOptions`
+
+The `DriverOptions` type is a discriminated union that maps each driver `type` to the correct options shape:
+
+```typescript
+import type { DriverOptions } from '@analog-tools/session';
+
+// TypeScript enforces options match the selected type
+const opts: DriverOptions = {
+  type: 'redis',
+  options: { url: 'redis://localhost:6379' }, // RedisOptions
+};
+
+// Type error — 'binding' is not a valid option for 'redis'
+const bad: DriverOptions = {
+  type: 'redis',
+  options: { binding: 'MY_KV' }, // TS error
+};
+```
+
+You can also use `ExtractDriverOptions` to narrow to a specific driver's options type:
+
+```typescript
+import type { ExtractDriverOptions } from '@analog-tools/session';
+
+type RedisOpts = ExtractDriverOptions<'redis'>;
+// { type: 'redis'; options: RedisOptions }
+```
+
+## Secret rotation
+
+Rotate session secrets without invalidating existing sessions by passing an array of secrets to `useSession`. The first secret signs new cookies; all secrets are tried when verifying existing cookies.
+
+```typescript
+// Step 1: Add the new secret as the first element
+const config = {
+  store,
+  secret: ['new-secret-2025', 'old-secret-2024'],
+  // New sessions are signed with 'new-secret-2025'
+  // Existing cookies signed with 'old-secret-2024' still validate
+};
+
+// Step 2: After all old sessions have expired (maxAge has elapsed),
+// remove the old secret
+const configAfterRotation = {
+  store,
+  secret: 'new-secret-2025',
+};
+```
+
+<Tip>
+  Wait at least one full `maxAge` interval before removing an old secret. Any sessions signed with the old secret and not yet expired will fail verification if you remove it too early.
+</Tip>
+
+## Known limitations
+
+<Warning>
+  The **memory driver has known issues** and should not be used for development or production. Use Redis, Cloudflare KV, or the filesystem driver instead.
+</Warning>
+
+- **No automatic TTL cleanup.** The `maxAge` field on `SessionConfig` controls the cookie expiry only. It does not instruct the store to purge expired session data. Drivers that support native TTL (Redis `EX`, Cloudflare KV `expirationTtl`) handle this automatically; file-based and memory drivers do not.
+- **No per-request locking.** Concurrent requests to the same session can race. The last write wins. If your application has concurrent write patterns, use a storage backend that supports atomic operations and implement application-level coordination.

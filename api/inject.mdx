@@ -1,0 +1,568 @@
+---
+title: "@analog-tools/inject"
+description: "Symbol-based dependency injection for AnalogJS and H3/Nitro server-side applications with scoped registries and async lifecycle management."
+---
+
+## Overview
+
+`@analog-tools/inject` provides a service registry DI system for AnalogJS and H3/Nitro server-side code. Services are identified by unique symbol tokens (via `@Injectable()`) instead of class names, making the system minification-safe. A global singleton scope handles most use cases; named scopes support test isolation and multi-tenant scenarios.
+
+```typescript
+import { Injectable, inject, registerService } from '@analog-tools/inject';
+
+@Injectable()
+class DatabaseService {
+  query(sql: string) { /* ... */ }
+}
+
+registerService(DatabaseService);
+
+const db = inject(DatabaseService);
+db.query('SELECT * FROM users');
+```
+
+---
+
+## Decorator
+
+### `@Injectable(token?)`
+
+Marks a class as injectable and assigns it a unique symbol token. Must be applied to any class used with `inject`, `registerService`, or their scoped variants.
+
+<ParamField path="token" type="symbol">
+  Optional custom symbol token. If omitted, a unique token is auto-generated from the class name and stored in a `WeakMap` (minification-safe).
+</ParamField>
+
+```typescript
+@Injectable()
+class MyService {}
+
+// With a custom token
+const MY_TOKEN = createServiceToken('MyService');
+
+@Injectable(MY_TOKEN)
+class MyService {}
+```
+
+<Note>
+  TypeScript decorators require `"target": "ES2015"` or later in `tsconfig.json`. No `emitDecoratorMetadata` or `reflect-metadata` is needed.
+</Note>
+
+---
+
+## Core Functions
+
+### `inject<T>(token, options?)`
+
+Retrieves a service instance from the global registry. If the service has not been registered yet and has no constructor arguments, it is auto-registered on first call.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class decorated with `@Injectable()`.
+</ParamField>
+
+<ParamField path="options.required" type="boolean">
+  Whether to throw if the service is not found. Default: `true`. Set to `false` to receive `undefined` instead of throwing.
+</ParamField>
+
+**Returns:** `T`
+
+**Throws:** `MissingServiceTokenError` if the class lacks `@Injectable()`. Throws `InjectionError` if `required` is `true` and the service resolves to `undefined`.
+
+```typescript
+const db = inject(DatabaseService);
+
+// Optional dependency
+const analytics = inject(AnalyticsService, { required: false });
+if (analytics) {
+  analytics.track('event');
+}
+```
+
+---
+
+### `injectAsync<T>(token, options?)`
+
+Retrieves a service instance and ensures `initializeAsync()` has been called and completed before returning. Concurrent calls share a single initialization promise.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class decorated with `@Injectable()`.
+</ParamField>
+
+<ParamField path="options.required" type="boolean">
+  Whether to throw if not found or initialization fails. Default: `true`.
+</ParamField>
+
+**Returns:** `Promise<T>`
+
+```typescript
+const db = await injectAsync(DatabaseService);
+await db.query('SELECT * FROM users');
+```
+
+---
+
+### `tryInject<T>(token)`
+
+A safer alternative to `inject(token, { required: false })`. Never throws — returns `undefined` if the service is not registered.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class decorated with `@Injectable()`.
+</ParamField>
+
+**Returns:** `T | undefined`
+
+```typescript
+const analytics = tryInject(AnalyticsService);
+if (analytics) {
+  analytics.track('page_view');
+}
+```
+
+---
+
+### `registerService<T>(token, ...args)`
+
+Creates and registers a singleton instance of the service using the given constructor arguments. Idempotent — calling it again for an already-registered service is a no-op (first registration wins).
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class decorated with `@Injectable()`.
+</ParamField>
+
+<ParamField path="...args" type="ConstructorParameters<T>">
+  Arguments passed to the class constructor.
+</ParamField>
+
+**Returns:** `void`
+
+```typescript
+@Injectable()
+class CacheService {
+  constructor(private ttl: number, private prefix: string) {}
+}
+
+registerService(CacheService, 300, 'app');
+```
+
+---
+
+### `registerAsync<T>(token, ...args)`
+
+Registers a service and eagerly calls `initializeAsync()` before resolving. Use this during application startup to ensure services are fully initialized before handling requests.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class decorated with `@Injectable()`.
+</ParamField>
+
+<ParamField path="...args" type="ConstructorParameters<T>">
+  Arguments passed to the class constructor.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+```typescript
+await registerAsync(DatabaseService);
+const db = inject(DatabaseService); // fully initialized
+```
+
+---
+
+### `registerServiceAsUndefined<T>(token)`
+
+Registers a service as `undefined` in the registry. Primarily used in tests to verify behavior when a dependency is absent.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class decorated with `@Injectable()`.
+</ParamField>
+
+**Returns:** `void`
+
+**Throws:** `MissingServiceTokenError` if the class is not decorated with `@Injectable()`.
+
+```typescript
+registerServiceAsUndefined(OptionalFeatureService);
+const feature = inject(OptionalFeatureService, { required: false });
+// feature === undefined
+```
+
+---
+
+### `destroyAllServicesAsync()`
+
+Destroys all services in the global registry by invoking their `onDestroy()` lifecycle hooks. Aggregates errors from multiple failed cleanups. Call this during application shutdown.
+
+**Returns:** `Promise<void>`
+
+**Throws:** `AggregateDestructionError` if one or more services fail during destruction.
+
+```typescript
+process.on('SIGTERM', async () => {
+  await destroyAllServicesAsync();
+  process.exit(0);
+});
+```
+
+---
+
+### `hasService<T>(token)`
+
+Checks if a service is registered in the global registry without attempting to create it. Never throws.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class to check.
+</ParamField>
+
+**Returns:** `boolean` — `true` if registered with a defined value.
+
+```typescript
+if (hasService(DatabaseService)) {
+  const db = inject(DatabaseService);
+}
+```
+
+---
+
+## InjectionContext (Scoped)
+
+`InjectionContext` is a static class managing named service registries for test isolation and multi-tenant scenarios. Each scope has its own independent registry; services do not inherit from parent or default scopes.
+
+<ResponseField name="createScope(name)" type="ServiceRegistry">
+  Creates a new named scope with its own registry. Throws if the scope already exists.
+
+  ```typescript
+  InjectionContext.createScope('my-scope');
+  ```
+</ResponseField>
+
+<ResponseField name="destroyScope(name)" type="void">
+  Destroys a scope synchronously and removes it.
+
+  ```typescript
+  InjectionContext.destroyScope('my-scope');
+  ```
+</ResponseField>
+
+<ResponseField name="destroyScopeAsync(scope)" type="Promise<void>">
+  Destroys a scope asynchronously, invoking `onDestroy()` hooks.
+
+  ```typescript
+  await InjectionContext.destroyScopeAsync('tenant-123');
+  ```
+</ResponseField>
+
+<ResponseField name="clearAll()" type="void">
+  Destroys all scopes synchronously. Useful in global test teardown.
+</ResponseField>
+
+<ResponseField name="clearAllAsync()" type="Promise<void>">
+  Destroys all scopes asynchronously, aggregating errors across all scopes.
+
+  ```typescript
+  afterEach(async () => {
+    await InjectionContext.clearAllAsync();
+  });
+  ```
+</ResponseField>
+
+<ResponseField name="getActiveScopes()" type="string[]">
+  Returns the names of all currently active scopes.
+
+  ```typescript
+  const scopes = InjectionContext.getActiveScopes();
+  // e.g. ['default', 'tenant-acme', 'test-scope-1']
+  ```
+</ResponseField>
+
+---
+
+## Scoped Functions
+
+### `registerServiceScoped(token, scope?, ...args)`
+
+Registers a service in a specific named scope.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class decorated with `@Injectable()`.
+</ParamField>
+
+<ParamField path="scope" type="string">
+  The scope name. Uses the default scope if omitted.
+</ParamField>
+
+<ParamField path="...args" type="ConstructorParameters<T>">
+  Constructor arguments.
+</ParamField>
+
+```typescript
+InjectionContext.createScope('test-scope');
+registerServiceScoped(DatabaseService, 'test-scope', 'postgres://test');
+```
+
+---
+
+### `injectScoped(token, scope?, options?)`
+
+Injects a service from a specific scope.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class.
+</ParamField>
+
+<ParamField path="scope" type="string">
+  The scope name.
+</ParamField>
+
+<ParamField path="options.required" type="boolean">
+  Whether to throw if not found. Default: `true`.
+</ParamField>
+
+**Returns:** `T`
+
+```typescript
+const db = injectScoped(DatabaseService, 'test-scope');
+```
+
+---
+
+### `registerMockServiceScoped(token, partial, scope)`
+
+Registers a partial mock object as a service in a specific scope.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class.
+</ParamField>
+
+<ParamField path="partial" type="Partial<T>" required>
+  The mock object to register.
+</ParamField>
+
+<ParamField path="scope" type="string" required>
+  The scope name.
+</ParamField>
+
+```typescript
+registerMockServiceScoped(DatabaseService, { query: async () => [] }, 'test-scope');
+```
+
+---
+
+### `resetScopedInjections(scope)`
+
+Clears all registered services within a scope without destroying the scope itself.
+
+<ParamField path="scope" type="string" required>
+  The scope name to reset.
+</ParamField>
+
+```typescript
+afterEach(() => {
+  resetScopedInjections('test-scope');
+});
+```
+
+---
+
+## Testing Utilities
+
+### `registerMockService<T>(token, partial)`
+
+Registers a partial object as the service instance in the global registry. For use in unit tests where only specific methods need to be stubbed.
+
+<ParamField path="token" type="InjectionServiceClass<T>" required>
+  The service class.
+</ParamField>
+
+<ParamField path="partial" type="Partial<T>" required>
+  Object used as the service instance.
+</ParamField>
+
+```typescript
+import { vi, afterEach } from 'vitest';
+import { registerMockService, resetAllInjections } from '@analog-tools/inject';
+
+const mockNotifications = { send: vi.fn() };
+
+afterEach(() => resetAllInjections());
+
+registerMockService(NotificationService, mockNotifications);
+const orders = inject(OrderService);
+orders.placeOrder('user-1', 'Widget');
+
+expect(mockNotifications.send).toHaveBeenCalled();
+```
+
+---
+
+### `resetAllInjections()`
+
+Clears all entries from the global service registry. Call in test teardown (`afterEach`) to isolate tests.
+
+```typescript
+afterEach(() => {
+  resetAllInjections();
+});
+```
+
+---
+
+## Error Types
+
+### `InjectionError`
+
+Base error class thrown by injection functions.
+
+<ResponseField name="token" type="string | undefined">
+  The class name of the service that failed to inject.
+</ResponseField>
+
+<ResponseField name="cause" type="Error | undefined">
+  Underlying error that caused the injection failure.
+</ResponseField>
+
+```typescript
+try {
+  inject(MyService);
+} catch (error) {
+  if (error instanceof InjectionError) {
+    console.error(`Failed to inject ${error.token}: ${error.message}`);
+  }
+}
+```
+
+---
+
+### `CircularDependencyError`
+
+Extends `InjectionError`. Thrown when a circular dependency is detected during service resolution (service A injects B, which injects A).
+
+```typescript
+try {
+  inject(ServiceA);
+} catch (error) {
+  if (error instanceof CircularDependencyError) {
+    console.error(`Circular dependency: ${error.message}`);
+    // message: "Circular dependency detected: ServiceA -> ServiceB -> ServiceA"
+  }
+}
+```
+
+---
+
+### `MissingServiceTokenError`
+
+Extends `InjectionError`. Thrown when attempting to inject a class that is not decorated with `@Injectable()`.
+
+```typescript
+class NotDecorated {}
+
+try {
+  inject(NotDecorated); // throws MissingServiceTokenError
+} catch (error) {
+  if (error instanceof MissingServiceTokenError) {
+    console.error(`${error.message} — add @Injectable() decorator`);
+  }
+}
+```
+
+---
+
+### `AggregateDestructionError`
+
+Extends `InjectionError`. Thrown when one or more services fail during `destroyAllServicesAsync()` or `InjectionContext.clearAllAsync()`.
+
+<ResponseField name="failures" type="Array<{ serviceName: string; error: Error }>">
+  List of services that failed destruction with their individual errors.
+</ResponseField>
+
+<ResponseField name="getErrors()" type="Error[]">
+  Returns all underlying errors as a flat array.
+</ResponseField>
+
+<ResponseField name="hasFailure(serviceName: string)" type="boolean">
+  Returns `true` if the specified service name is in the failures list.
+</ResponseField>
+
+```typescript
+try {
+  await destroyAllServicesAsync();
+} catch (error) {
+  if (error instanceof AggregateDestructionError) {
+    error.failures.forEach((f) => {
+      console.error(`${f.serviceName}: ${f.error.message}`);
+    });
+
+    if (error.hasFailure('DatabaseService')) {
+      console.error('Database cleanup failed — may have connection leaks');
+    }
+  }
+}
+```
+
+---
+
+## AsyncInjectableService Interface
+
+Implement this interface on services that need asynchronous initialization or resource cleanup.
+
+<ResponseField name="initializeAsync()" type="() => Promise<void>">
+  Called after construction to perform async initialization. The service is not considered ready until this resolves. Called by `injectAsync()` and `registerAsync()`.
+</ResponseField>
+
+<ResponseField name="onDestroy()" type="() => Promise<void>">
+  Called when the service is being destroyed via `destroyAllServicesAsync()` or the scoped destroy APIs. Use this to close connections, clear timers, and release resources.
+</ResponseField>
+
+```typescript
+@Injectable()
+class DatabaseService implements AsyncInjectableService {
+  private connection: Connection | null = null;
+
+  async initializeAsync(): Promise<void> {
+    this.connection = await createConnection({ host: 'localhost', database: 'myapp' });
+  }
+
+  async onDestroy(): Promise<void> {
+    if (this.connection) {
+      await this.connection.close();
+      this.connection = null;
+    }
+  }
+
+  async query(sql: string): Promise<unknown[]> {
+    if (!this.connection) throw new Error('Not initialized');
+    return this.connection.query(sql);
+  }
+}
+```
+
+---
+
+## Symbol Tokens
+
+### `SERVICE_TOKEN`
+
+The symbol key used by `@Injectable()` to store the service token on the class. Access it to retrieve the token assigned to a service.
+
+```typescript
+import { SERVICE_TOKEN } from '@analog-tools/inject';
+
+const token: symbol = MyService[SERVICE_TOKEN];
+```
+
+---
+
+### `createServiceToken(name?)`
+
+Creates a unique symbol for use as a custom service token.
+
+<ParamField path="name" type="string">
+  Optional descriptive name for the symbol. Defaults to `'ServiceToken'`.
+</ParamField>
+
+**Returns:** `symbol`
+
+```typescript
+const MY_TOKEN = createServiceToken('MyService');
+
+@Injectable(MY_TOKEN)
+class MyService {}
+```

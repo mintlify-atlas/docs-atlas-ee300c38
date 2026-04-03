@@ -1,0 +1,210 @@
+---
+title: "Angular client"
+description: "Angular services, interceptors, guards, and tRPC integration for the @analog-tools/auth BFF pattern."
+---
+
+The `@analog-tools/auth/angular` entry point provides Angular-side integration with the server BFF auth routes. It communicates with `/api/auth/*` endpoints to manage authentication state reactively using Angular signals.
+
+## Installation
+
+The Angular client is included in `@analog-tools/auth`. Install the Angular peer dependencies if you haven't already:
+
+```bash
+npm install @analogjs/router @angular/core @angular/common @angular/router rxjs
+```
+
+## Setup
+
+Register the auth providers in your application config:
+
+```typescript
+// src/app/app.config.ts
+import { ApplicationConfig } from '@angular/core';
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+import { provideFileRouter } from '@analogjs/router';
+import { provideAuthClient, authInterceptor } from '@analog-tools/auth/angular';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideFileRouter(),
+    provideHttpClient(withInterceptors([authInterceptor])),
+    provideAuthClient(),
+  ],
+};
+```
+
+`provideAuthClient()` registers `AuthService` in the Angular DI environment. `authInterceptor` must be registered with `withInterceptors` for proper HTTP behavior.
+
+## `authInterceptor`
+
+The `authInterceptor` runs on every outgoing HTTP request and does two things:
+
+1. **Adds a `fetch: 'true'` header** — tells the server middleware to respond with 401 instead of a login redirect when the session is invalid.
+2. **Catches 401 responses** — redirects the browser to `/api/auth/login` with the current URL as the `redirect_uri`, so the user returns to their original page after login.
+
+<Note>
+  The interceptor skips `/api/auth/callback` and `/api/auth/login` requests to
+  avoid circular redirects.
+</Note>
+
+## `AuthService`
+
+Inject `AuthService` to access reactive authentication state and trigger login/logout:
+
+```typescript
+import { Component, inject } from '@angular/core';
+import { AuthService } from '@analog-tools/auth/angular';
+
+@Component({
+  standalone: true,
+  template: `
+    @if (auth.isAuthenticated()) {
+      <p>Hello, {{ auth.user()?.fullName }}</p>
+      <button (click)="auth.logout()">Logout</button>
+    } @else {
+      <button (click)="auth.login()">Login</button>
+    }
+  `,
+})
+export default class HomePage {
+  auth = inject(AuthService);
+}
+```
+
+### Signals
+
+| Signal | Type | Description |
+|---|---|---|
+| `isAuthenticated` | `Signal<boolean>` | `true` when the server confirms a valid session. Re-checked every 5 minutes while in the browser. |
+| `user` | `Signal<AuthUser \| null>` | Normalized user profile fetched from `/api/auth/user`. Only populated when `isAuthenticated` is `true`. |
+
+### Methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `login` | `(targetUrl?: string) => void` | Redirects the browser to `/api/auth/login`. Pass a URL to return to after authentication; defaults to the current route. |
+| `logout` | `() => void` | Clears local state and redirects the browser to `/api/auth/logout`. |
+| `hasRoles` | `(roles: string[]) => boolean` | Returns `true` if the current user has **any** of the specified roles. |
+
+## `AuthUser` interface
+
+`AuthService` normalizes provider-specific user data (Auth0, Keycloak, generic OIDC) into a consistent shape:
+
+```typescript
+interface AuthUser {
+  username: string;
+  fullName: string;
+  givenName: string;
+  familyName: string;
+  picture?: string;
+  email?: string;
+  emailVerified?: boolean;
+  locale?: string;
+  lastLogin?: string;
+  updatedAt?: string;
+  createdAt?: string;
+  auth_id?: string;
+  roles?: string[];
+}
+```
+
+## Route guards
+
+### `authGuard`
+
+Protect a route so only authenticated users can access it. Unauthenticated users are redirected to login with the current URL as the return destination.
+
+```typescript
+import { authGuard } from '@analog-tools/auth/angular';
+
+export const routeMeta = {
+  canActivate: [authGuard],
+};
+```
+
+### `roleGuard`
+
+Restrict a route to users with specific roles. Users without the required roles are redirected to `/access-denied`. If the user is not authenticated at all, they are redirected to login first.
+
+```typescript
+import { roleGuard } from '@analog-tools/auth/angular';
+
+export const routeMeta = {
+  canActivate: [roleGuard],
+  data: {
+    roles: ['admin', 'editor'],  // User needs at least one of these
+  },
+};
+```
+
+<Note>
+  `roleGuard` checks for **any** of the listed roles, not all of them. A user
+  with the `editor` role passes a guard requiring `['admin', 'editor']`.
+</Note>
+
+## tRPC integration
+
+Use `createTrpcClientWithAuth` to forward session cookies through tRPC calls so server-side procedures can authenticate the request.
+
+### Client setup
+
+```typescript
+// src/trpc-client.ts
+import { createTrpcClient } from '@analogjs/trpc';
+import { inject } from '@angular/core';
+import { injectRequest } from '@analogjs/router/tokens';
+import { createTrpcClientWithAuth } from '@analog-tools/auth/angular';
+import { AppRouter } from './server/trpc/routers';
+
+export const { provideTrpcClient, TrpcClient, TrpcHeaders } =
+  createTrpcClient<AppRouter>({
+    url: '/api/trpc',
+  });
+
+export function injectTrpcClient() {
+  return createTrpcClientWithAuth(inject(TrpcClient), injectRequest(), TrpcHeaders);
+}
+```
+
+`createTrpcClientWithAuth` sets the `fetch: 'true'` and `cookie` headers on every tRPC request, and wraps the client with error handling for 401 responses.
+
+### Server-side tRPC middleware
+
+On the server, use `checkAuthentication` in a tRPC middleware to protect procedures:
+
+```typescript
+// src/server/trpc/trpc.ts
+import { initTRPC, TRPCError } from '@trpc/server';
+import { checkAuthentication } from '@analog-tools/auth';
+
+const t = initTRPC.context<{ event: H3Event }>().create();
+
+const isAuthenticated = t.middleware(async ({ ctx, next }) => {
+  if (!(await checkAuthentication(ctx.event))) {
+    throw new TRPCError({ code: 'UNAUTHORIZED' });
+  }
+  return next({ ctx });
+});
+
+export const publicProcedure = t.procedure;
+export const protectedProcedure = t.procedure.use(isAuthenticated);
+```
+
+Use `protectedProcedure` for any tRPC procedure that requires the user to be logged in.
+
+## Exports reference
+
+All Angular client exports are available from the `@analog-tools/auth/angular` entry point:
+
+```typescript
+import {
+  provideAuthClient,
+  AuthService,
+  type AuthUser,
+  authGuard,
+  roleGuard,
+  authInterceptor,
+  provideAuthInterceptor,
+  createTrpcClientWithAuth,
+} from '@analog-tools/auth/angular';
+```

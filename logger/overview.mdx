@@ -1,0 +1,620 @@
+---
+title: "@analog-tools/logger"
+description: "Structured logging for AnalogJS, Nitro, and H3-based server applications with deduplication, sanitization, and pluggable formatters."
+---
+
+`@analog-tools/logger` provides context-based child loggers, log deduplication, error serialization with circular reference handling, and pluggable output formatters — console with ANSI colors, JSON for log aggregation, or a custom formatter you define.
+
+## Installation
+
+<Tabs>
+  <Tab title="Logger only">
+    ```bash
+    npm install @analog-tools/logger
+    ```
+  </Tab>
+  <Tab title="With DI and Nitro integration">
+    ```bash
+    npm install @analog-tools/logger @analog-tools/inject
+    ```
+    `@analog-tools/inject` is an optional peer dependency, required only for Nitro integration and DI patterns.
+  </Tab>
+</Tabs>
+
+## Quick start
+
+```typescript
+import { LoggerService } from '@analog-tools/logger';
+
+const logger = new LoggerService({
+  level: 'info',
+  name: 'my-app',
+});
+
+logger.info('Server started on port 3000');
+logger.warn('Cache miss for key user:123');
+logger.error('Failed to connect to database', new Error('ECONNREFUSED'));
+
+// Create a child logger with context
+const dbLogger = logger.forContext('database');
+dbLogger.debug('Query executed in 42ms');
+```
+
+---
+
+## Log levels
+
+Seven levels, ordered by severity. Messages below the configured threshold are discarded without evaluation.
+
+| Level | Numeric | Console method | Use case |
+|---|---|---|---|
+| `trace` | 0 | `console.trace` | Granular diagnostics, function entry/exit |
+| `debug` | 1 | `console.debug` | Development-time debugging |
+| `info` | 2 | `console.info` | Normal operational events |
+| `warn` | 3 | `console.warn` | Recoverable issues, deprecation notices |
+| `error` | 4 | `console.error` | Failures requiring attention |
+| `fatal` | 5 | `console.error` | Unrecoverable errors, imminent shutdown |
+| `silent` | 6 | (none) | Suppress all output |
+
+```typescript
+const logger = new LoggerService({ level: 'warn' });
+
+logger.debug('skipped'); // not logged
+logger.info('skipped');  // not logged
+logger.warn('logged');   // logged
+logger.error('logged');  // logged
+```
+
+The `LogLevel` type provides compile-time checking and `isValidLogLevel()` handles runtime validation for external input:
+
+```typescript
+import { LogLevel, isValidLogLevel } from '@analog-tools/logger';
+
+const envLevel = process.env['LOG_LEVEL'] || 'info';
+if (isValidLogLevel(envLevel)) {
+  new LoggerService({ level: envLevel });
+}
+```
+
+Invalid levels passed to the constructor throw a `LoggerError`.
+
+---
+
+## `forContext()` child loggers
+
+`forContext()` creates child loggers that share configuration with the parent but include a context label in output. Child loggers are **cached** — calling `forContext('db')` twice returns the same instance.
+
+```typescript
+const logger = new LoggerService({ level: 'debug', name: 'my-app' });
+
+const authLogger = logger.forContext('auth');
+const dbLogger = logger.forContext('database');
+
+authLogger.info('User authenticated');
+// Output: [my-app:auth] User authenticated
+
+dbLogger.error('Connection pool exhausted');
+// Output: [my-app:database] Connection pool exhausted
+```
+
+### Disabling specific contexts
+
+Suppress output from specific contexts without changing log levels:
+
+```typescript
+const logger = new LoggerService({
+  level: 'debug',
+  name: 'my-app',
+  disabledContexts: ['verbose-polling', 'health-check'],
+});
+
+const polling = logger.forContext('verbose-polling');
+polling.info('tick'); // suppressed
+
+// Modify at runtime
+logger.setDisabledContexts(['health-check']);
+polling.info('tick'); // now logged
+```
+
+---
+
+## Formatters
+
+The logger supports pluggable output formatters.
+
+### Console formatter (default)
+
+ANSI-colored terminal output. Set `useColors: false` to strip ANSI codes:
+
+```typescript
+const logger = new LoggerService({
+  name: 'my-app',
+  level: 'info',
+  useColors: true, // default; set false to strip ANSI codes
+});
+```
+
+### JSON formatter
+
+Outputs one JSON object per log line — useful for piping to log aggregation tools (Datadog, ELK, CloudWatch):
+
+```typescript
+import { FormatterFactory } from '@analog-tools/logger';
+
+const logger = new LoggerService({
+  name: 'my-app',
+  level: 'info',
+  formatter: FormatterFactory.createJson(),
+});
+
+logger.info('Request handled', { userId: '42', duration: 150 });
+// Output: {"timestamp":"2025-01-15T10:30:00.000Z","level":"info","logger":"my-app","message":"Request handled","metadata":{"userId":"42","duration":150}}
+
+// Pretty-print for development
+const devLogger = new LoggerService({
+  formatter: FormatterFactory.createJson({ prettyPrint: true }),
+});
+```
+
+### Custom formatter
+
+Pass a function via `FormatterFactory.createCustom()`. The function receives a `LogEntry` and must return a string:
+
+```typescript
+import { FormatterFactory, LogEntry } from '@analog-tools/logger';
+
+const logger = new LoggerService({
+  name: 'my-app',
+  formatter: FormatterFactory.createCustom((entry: LogEntry) => {
+    return `${entry.timestamp.toISOString()} [${entry.level}] ${entry.message}`;
+  }),
+});
+```
+
+The `LogEntry` interface:
+
+```typescript
+interface LogEntry {
+  readonly level: LogLevelEnum;
+  readonly message: string;
+  readonly logger: string;
+  readonly timestamp: Date;
+  readonly context?: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly error?: Error;
+  readonly styling?: LogStyling;
+  readonly correlationId?: string;
+}
+```
+
+---
+
+## Error handling
+
+The `error()` and `fatal()` methods accept multiple call signatures:
+
+```typescript
+// Message only
+logger.error('Connection refused');
+
+// Error object only (message extracted automatically)
+logger.error(new Error('ECONNREFUSED'));
+
+// Message + Error
+logger.error('Database query failed', new Error('timeout'));
+
+// Message + structured context
+logger.error('Validation failed', { field: 'email', value: 'not-an-email' });
+
+// Message + Error + context
+logger.error('Payment failed', paymentError, {
+  orderId: 'ord-123',
+  amount: 99.99,
+});
+```
+
+### `ErrorSerializer`
+
+Errors are serialized using `ErrorSerializer`, which handles circular references, deep object graphs, `Error.cause` chains, and non-enumerable properties. Results are cached (up to 100 entries) based on error identity.
+
+```typescript
+import { ErrorSerializer } from '@analog-tools/logger';
+
+const serialized = ErrorSerializer.serialize(error, {
+  includeStack: false,         // omit stack traces in production logs
+  maxDepth: 5,                 // limit object traversal depth
+  includeNonEnumerable: true,  // include non-enumerable properties
+});
+```
+
+---
+
+## Log deduplication
+
+`LogDeduplicator` batches identical messages within a time window and outputs them with a repeat count. Only simple messages (no metadata or extra data) are deduplicated.
+
+```typescript
+const logger = new LoggerService({
+  level: 'info',
+  name: 'my-app',
+  deduplication: {
+    enabled: true,
+    windowMs: 5000,        // batch window (default: 5000ms)
+    flushOnCritical: true, // flush pending messages on error/fatal (default: true)
+  },
+});
+
+// These three calls produce one output line after the window expires:
+logger.info('Retrying connection...');
+logger.info('Retrying connection...');
+logger.info('Retrying connection...');
+// Output after 5s: [my-app] Retrying connection... (x3)
+```
+
+**Deduplication behavior:**
+
+- `error` and `fatal` messages bypass deduplication entirely and log immediately.
+- Messages with metadata, styling, or extra data arguments are never batched.
+- Different contexts are tracked separately — a child logger's messages do not batch with the parent's.
+- Different log levels are tracked separately, even for the same message text.
+
+---
+
+## Log sanitization
+
+The logger sanitizes sensitive data by default to prevent accidental exposure. Sanitization is enabled out of the box with secure defaults.
+
+### Default behavior
+
+Sensitive data patterns are automatically redacted:
+
+```typescript
+const logger = new LoggerService({ level: 'info' });
+
+logger.info('User login', {
+  password: 'mySecretPassword123',   // → [REDACTED]
+  token: 'abc123def456ghi789jkl',    // → [TOKEN] (base64-like)
+  email: 'user@example.com',         // → [EMAIL]
+  creditCard: '4532-1234-5678-9012', // → [CARD]
+  ip: '192.168.1.1',                 // → [IP]
+});
+```
+
+Object properties with these names are fully redacted regardless of value: `password`, `token`, `secret`, `apiKey`, `authorization`, `credential`, `private`.
+
+Control characters (newlines, tabs, etc.) are also escaped to prevent log injection attacks.
+
+### Configuration
+
+<CodeGroup>
+
+```typescript Opt out (development)
+const logger = new LoggerService({
+  level: 'debug',
+  sanitization: { enabled: false },
+});
+```
+
+```typescript Custom rules (append to defaults)
+const logger = new LoggerService({
+  sanitization: {
+    customRules: [
+      { pattern: /userId:\s*\d+/gi, replacement: 'userId: [USER_ID]' },
+    ],
+  },
+});
+```
+
+```typescript Replace default rules
+const logger = new LoggerService({
+  sanitization: {
+    rules: [
+      { pattern: /secret/gi, replacement: '***' },
+    ],
+  },
+});
+```
+
+</CodeGroup>
+
+### Sanitization strategies
+
+| Strategy | Description | Example |
+|---|---|---|
+| `mask` | Replace with string (default) | `secret` → `[REDACTED]` |
+| `remove` | Remove matched text | `my secret` → `my ` |
+| `hash` | Replace with truncated hash | `secret` → `[HASH:a3f2b1c8]` |
+| `custom` | Custom handler function | `1234-5678` → `****-5678` |
+
+```typescript
+const logger = new LoggerService({
+  sanitization: {
+    customRules: [
+      // Hash emails for correlation without exposing PII
+      { pattern: /\b[\w.]+@[\w.]+\.\w+\b/g, strategy: 'hash', hashLength: 8 },
+
+      // Partial mask for credit cards
+      {
+        pattern: /\b(\d{4})-?\d{4}-?\d{4}-?(\d{4})\b/g,
+        strategy: 'custom',
+        customHandler: (match: string) => `****-****-****-${match.slice(-4)}`,
+      },
+    ],
+  },
+});
+```
+
+---
+
+## Nitro/H3 integration
+
+Two utilities add logging to Nitro event handlers. Both require `@analog-tools/inject` and use `inject(LoggerService)` internally.
+
+### Middleware
+
+Attaches a logger to the event context and logs incoming requests at debug level:
+
+```typescript
+// src/server/middleware/logging.ts
+import { createLoggerMiddleware } from '@analog-tools/logger';
+
+export default createLoggerMiddleware('api');
+// Adds event.context['logger'] as a LoggerService instance
+```
+
+### Handler wrapper
+
+Wraps a handler with request timing and error logging:
+
+```typescript
+// src/server/routes/api/products/index.ts
+import { defineEventHandler } from 'h3';
+import { withLogging } from '@analog-tools/logger';
+
+export default withLogging(
+  defineEventHandler(() => {
+    return { products: [] };
+  }),
+  {
+    namespace: 'products-api', // context name (default: 'api')
+    level: 'info',             // log level for success (default: 'debug')
+    logResponse: true,         // include response body in log (default: false)
+  }
+);
+// On success: "[my-app:products-api] Request completed in 12ms"
+// On error:   "[my-app:products-api] Request failed after 45ms" + serialized error
+```
+
+---
+
+## DI integration with `@analog-tools/inject`
+
+`LoggerService` is injectable — register it once and inject it anywhere:
+
+```typescript
+import { inject, registerService } from '@analog-tools/inject';
+import { LoggerService } from '@analog-tools/logger';
+
+// Register with configuration
+registerService(LoggerService, {
+  level: 'debug',
+  name: 'my-app',
+  disabledContexts: ['health-check'],
+});
+
+// Inject in services
+class OrderService {
+  private logger = inject(LoggerService).forContext('orders');
+
+  async createOrder(data: OrderData) {
+    this.logger.info('Creating order', { customerId: data.customerId });
+    // ...
+  }
+}
+```
+
+For projects not using DI, create and share instances directly:
+
+```typescript
+// src/server/utils/logger.ts
+import { LoggerService } from '@analog-tools/logger';
+
+export const logger = new LoggerService({
+  level: process.env['LOG_LEVEL'] || 'info',
+  name: 'my-api',
+});
+```
+
+---
+
+## Lazy message evaluation
+
+Pass a function instead of a string to defer expensive computations. The function is only called if the message will actually be logged:
+
+```typescript
+// Always evaluates JSON.stringify, even when debug is disabled
+logger.debug(JSON.stringify(largeObject)); // wasteful
+
+// Only evaluates when debug level is active
+logger.debug(() => JSON.stringify(largeObject));
+
+// Complex computation
+logger.trace(() => {
+  const metrics = gatherSystemMetrics();
+  return `System: ${JSON.stringify(metrics)}`;
+});
+```
+
+If the function throws, the logger catches the error and outputs a placeholder message instead of crashing.
+
+<Tip>
+  Use lazy evaluation only for genuinely expensive operations. For plain strings, pass them directly — the overhead of a function call is not worth it.
+</Tip>
+
+---
+
+## Correlation ID tracking
+
+Attach a correlation ID to a logger instance for request-scoped tracing. The ID appears in both console and JSON formatted output:
+
+```typescript
+const logger = new LoggerService({ name: 'my-app' });
+logger.setCorrelationId('req-abc-123');
+
+logger.info('Processing request');
+// JSON output includes: "correlationId": "req-abc-123"
+
+logger.clearCorrelationId();
+```
+
+You can also set it at construction time:
+
+```typescript
+const logger = new LoggerService({
+  name: 'my-app',
+  correlationId: 'req-abc-123',
+});
+```
+
+---
+
+## Log grouping
+
+Visual grouping uses `console.group` / `console.groupEnd` under the hood:
+
+```typescript
+logger.group('Database Migration');
+logger.info('Running migration 001_create_users');
+logger.info('Running migration 002_add_indexes');
+logger.groupEnd('Database Migration');
+
+// Nested groups
+logger.group('Request Processing');
+logger.info('Validating input');
+logger.group('Database Queries');
+logger.debug('SELECT * FROM users WHERE id = $1');
+logger.groupEnd('Database Queries');
+logger.groupEnd('Request Processing');
+
+// End most recent group without specifying name
+logger.group('Batch Job');
+logger.info('Processing...');
+logger.groupEnd();
+```
+
+---
+
+## Environment variables
+
+These are read at construction time if the corresponding config option is not explicitly provided.
+
+| Variable | Description | Default |
+|---|---|---|
+| `LOG_LEVEL` | Default log level | `info` |
+| `LOG_DISABLED_CONTEXTS` | Comma-separated contexts to suppress | (none) |
+
+```bash
+LOG_LEVEL=debug
+LOG_DISABLED_CONTEXTS=health-check,polling
+```
+
+---
+
+## API reference
+
+### `LoggerService`
+
+```typescript
+@Injectable()
+class LoggerService {
+  constructor(config?: LoggerConfig);
+
+  // Child loggers
+  forContext(context: string): LoggerService;
+
+  // Log methods (all accept string | () => string)
+  trace(message: LogMessage, ...data: unknown[]): void;
+  debug(message: LogMessage, ...data: unknown[]): void;
+  info(message: LogMessage, ...data: unknown[]): void;
+  warn(message: LogMessage, ...data: unknown[]): void;
+  error(messageOrError: string | Error, ...args: unknown[]): void;
+  fatal(messageOrError: string | Error, ...args: unknown[]): void;
+
+  // Grouping
+  group(groupName: string): void;
+  groupEnd(groupName?: string): void;
+
+  // Configuration
+  getLogLevel(): LogLevelEnum;
+  getDisabledContexts(): string[];
+  setDisabledContexts(contexts: string[]): void;
+  setUseColors(enabled: boolean): void;
+  getUseColors(): boolean;
+  setCorrelationId(id: string): void;
+  getCorrelationId(): string | undefined;
+  clearCorrelationId(): void;
+}
+```
+
+### `LoggerConfig`
+
+```typescript
+interface LoggerConfig {
+  level?: LogLevel;             // default: 'info' (or LOG_LEVEL env var)
+  name?: string;                // default: 'analog-tools'
+  disabledContexts?: string[];  // contexts to suppress
+  useColors?: boolean;          // default: true
+  formatter?: ILogFormatter;    // default: ConsoleFormatter
+  correlationId?: string;       // request-scoped tracing ID
+  deduplication?: {
+    enabled: boolean;
+    windowMs?: number;          // default: 5000
+    flushOnCritical?: boolean;  // default: true
+  };
+  sanitization?: {
+    enabled?: boolean;
+    rules?: SanitizationRule[];
+    customRules?: SanitizationRule[];
+  };
+}
+```
+
+### `FormatterFactory`
+
+```typescript
+class FormatterFactory {
+  static createConsole(config?: { useColors?: boolean }): ILogFormatter;
+  static createJson(config?: { prettyPrint?: boolean }): ILogFormatter;
+  static createCustom(fn: (entry: LogEntry) => string): ILogFormatter;
+}
+```
+
+### `ErrorSerializer`
+
+```typescript
+class ErrorSerializer {
+  static serialize(
+    error: unknown,
+    options?: {
+      includeStack?: boolean;         // default: true
+      maxDepth?: number;              // default: 10
+      includeNonEnumerable?: boolean; // default: false
+    }
+  ): StructuredError | string;
+}
+```
+
+### Nitro utilities
+
+```typescript
+function createLoggerMiddleware(namespace?: string): EventHandler;
+
+function withLogging<T extends EventHandlerRequest>(
+  handler: EventHandler<T>,
+  options?: {
+    namespace?: string;
+    level?: LogLevel;
+    logResponse?: boolean;
+  }
+): EventHandler<T>;
+```

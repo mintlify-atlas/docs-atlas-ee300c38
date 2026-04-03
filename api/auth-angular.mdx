@@ -1,0 +1,321 @@
+---
+title: "@analog-tools/auth/angular"
+description: "Angular client-side services, guards, and interceptors for the BFF authentication pattern."
+---
+
+## Overview
+
+The `@analog-tools/auth/angular` entry point provides Angular 19+ services for the client side of the BFF authentication pattern. It communicates with the server-side auth routes (`/api/auth/*`) to manage authentication state reactively using Angular signals.
+
+```typescript
+// src/app/app.config.ts
+import { ApplicationConfig } from '@angular/core';
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+import { provideFileRouter } from '@analogjs/router';
+import { provideAuthClient, authInterceptor } from '@analog-tools/auth/angular';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideFileRouter(),
+    provideHttpClient(withInterceptors([authInterceptor])),
+    provideAuthClient(),
+  ],
+};
+```
+
+---
+
+## Setup Functions
+
+### `provideAuthClient()`
+
+Registers `AuthService` as an Angular environment provider. Call this in your root `ApplicationConfig`.
+
+**Returns:** `EnvironmentProviders`
+
+```typescript
+import { provideAuthClient } from '@analog-tools/auth/angular';
+
+export const appConfig: ApplicationConfig = {
+  providers: [provideAuthClient()],
+};
+```
+
+---
+
+### `authInterceptor`
+
+An `HttpInterceptorFn` that:
+
+1. Adds a `fetch: 'true'` header to all requests so the server returns `401` instead of redirecting to login.
+2. Catches `401` responses and redirects the browser to `/api/auth/login` with the current URL as `redirect_uri`.
+
+Auth endpoints (`/api/auth/callback`, `/api/auth/login`) are skipped to avoid circular redirect issues.
+
+```typescript
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
+import { authInterceptor } from '@analog-tools/auth/angular';
+
+provideHttpClient(withInterceptors([authInterceptor]));
+```
+
+---
+
+### `provideAuthInterceptor()`
+
+An alternative way to register `authInterceptor` using the multi-provider token pattern. Returns an `HTTP_INTERCEPTORS` provider entry.
+
+```typescript
+import { provideAuthInterceptor } from '@analog-tools/auth/angular';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideAuthInterceptor(),
+  ],
+};
+```
+
+<Note>
+  Prefer `provideHttpClient(withInterceptors([authInterceptor]))` — the functional interceptor approach is the recommended pattern in Angular 15+. Use `provideAuthInterceptor()` only if you need the legacy class-based interceptor provider.
+</Note>
+
+---
+
+## AuthService
+
+Injectable service that provides reactive authentication state via Angular signals. Provided via `provideAuthClient()`.
+
+```typescript
+import { Component, inject } from '@angular/core';
+import { AuthService } from '@analog-tools/auth/angular';
+
+@Component({
+  standalone: true,
+  template: `
+    @if (auth.isAuthenticated()) {
+      <p>Hello, {{ auth.user()?.fullName }}</p>
+      <button (click)="auth.logout()">Logout</button>
+    } @else {
+      <button (click)="auth.login()">Login</button>
+    }
+  `,
+})
+export default class HomePage {
+  auth = inject(AuthService);
+}
+```
+
+### Signals
+
+<ResponseField name="isAuthenticated" type="Signal<boolean>">
+  Reactive signal that is `true` when the server confirms a valid session. Backed by an HTTP resource that polls `/api/auth/authenticated` every 5 minutes and on initialization.
+
+  ```typescript
+  const auth = inject(AuthService);
+  if (auth.isAuthenticated()) {
+    // user has a valid session
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="user" type="Signal<AuthUser | null>">
+  Reactive signal containing the authenticated user profile. Fetches from `/api/auth/user` when `isAuthenticated()` is `true`. Provider-specific user data (Auth0, Keycloak, generic OIDC) is normalized into the `AuthUser` shape. Returns `null` when unauthenticated.
+
+  ```typescript
+  const user = inject(AuthService).user();
+  console.log(user?.fullName);
+  ```
+</ResponseField>
+
+### Methods
+
+<ResponseField name="login(targetUrl?: string)" type="void">
+  Redirects the browser to `/api/auth/login`. Pass a `targetUrl` to return to that URL after authentication; defaults to the current router URL.
+
+  <ParamField path="targetUrl" type="string">
+    Optional URL to redirect to after successful authentication.
+  </ParamField>
+
+  ```typescript
+  auth.login('/dashboard');
+  ```
+</ResponseField>
+
+<ResponseField name="logout()" type="void">
+  Clears local user state and redirects the browser to `/api/auth/logout`, which revokes tokens and clears the server-side session.
+
+  ```typescript
+  auth.logout();
+  ```
+</ResponseField>
+
+<ResponseField name="hasRoles(roles: string[])" type="boolean">
+  Returns `true` if the authenticated user has **any** of the specified roles. Returns `false` if the user is not authenticated or has no roles.
+
+  <ParamField path="roles" type="string[]" required>
+    Array of role names. A match on any one role returns `true`.
+  </ParamField>
+
+  ```typescript
+  if (auth.hasRoles(['admin', 'editor'])) {
+    // show edit controls
+  }
+  ```
+</ResponseField>
+
+---
+
+## AuthUser Interface
+
+Normalized user profile returned by `AuthService.user()`. The service transforms provider-specific fields (Auth0, Keycloak, generic OIDC) into this unified shape.
+
+<ResponseField name="username" type="string" required>
+  User's login name or unique identifier from the provider.
+</ResponseField>
+
+<ResponseField name="fullName" type="string" required>
+  User's display name.
+</ResponseField>
+
+<ResponseField name="givenName" type="string" required>
+  First name.
+</ResponseField>
+
+<ResponseField name="familyName" type="string" required>
+  Last name / family name.
+</ResponseField>
+
+<ResponseField name="picture" type="string">
+  URL to the user's profile picture.
+</ResponseField>
+
+<ResponseField name="email" type="string">
+  User's email address.
+</ResponseField>
+
+<ResponseField name="emailVerified" type="boolean">
+  Whether the email address has been verified by the provider.
+</ResponseField>
+
+<ResponseField name="locale" type="string">
+  User's preferred locale (e.g., `"en-US"`).
+</ResponseField>
+
+<ResponseField name="lastLogin" type="string">
+  ISO 8601 timestamp of the user's last login.
+</ResponseField>
+
+<ResponseField name="updatedAt" type="string">
+  ISO 8601 timestamp of last profile update.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 timestamp of account creation.
+</ResponseField>
+
+<ResponseField name="auth_id" type="string">
+  Provider-specific user ID (e.g., Auth0 `sub`).
+</ResponseField>
+
+<ResponseField name="roles" type="string[]">
+  Array of role names assigned to the user. Used by `hasRoles()` and `roleGuard`.
+</ResponseField>
+
+---
+
+## Route Guards
+
+### `authGuard`
+
+A `CanActivateFn` that checks authentication before activating a route. Redirects unauthenticated users to `/api/auth/login` with the current URL as `redirect_uri`.
+
+```typescript
+import { authGuard } from '@analog-tools/auth/angular';
+
+export const routeMeta = {
+  canActivate: [authGuard],
+};
+```
+
+### `roleGuard`
+
+A `CanActivateFn` that checks both authentication and role membership. Reads the required roles from `route.data.roles`. Redirects unauthenticated users to login, and redirects authenticated users lacking the required roles to `/access-denied`.
+
+<ParamField path="route.data.roles" type="string[]" required>
+  Array of role names in the route's `data` object. The user must have **at least one** of these roles.
+</ParamField>
+
+```typescript
+import { roleGuard } from '@analog-tools/auth/angular';
+
+export const routeMeta = {
+  canActivate: [roleGuard],
+  data: {
+    roles: ['admin', 'editor'],
+  },
+};
+```
+
+| Condition | Result |
+|-----------|--------|
+| No roles defined in `data` | Allow access |
+| User not authenticated | Redirect to `/api/auth/login` |
+| User authenticated, has required role | Allow access |
+| User authenticated, missing required roles | Redirect to `/access-denied` |
+
+---
+
+## tRPC Integration
+
+### `createTrpcClientWithAuth(trpcClient, request, TrpcHeaders)`
+
+Wraps a tRPC client to forward session cookies from the incoming server request into tRPC calls. Also adds a `fetch: 'true'` header for proper error handling.
+
+<ParamField path="trpcClient" type="T" required>
+  The tRPC client instance created by `createTrpcClient`.
+</ParamField>
+
+<ParamField path="request" type="ServerRequest | null" required>
+  The incoming server request, obtained via `injectRequest()` from `@analogjs/router/tokens`.
+</ParamField>
+
+<ParamField path="TrpcHeaders" type="WritableSignal<HTTPHeaders>" required>
+  The writable headers signal from `createTrpcClient`, used to inject cookies and auth headers.
+</ParamField>
+
+**Returns:** The wrapped tRPC client with error handling for `401` responses.
+
+```typescript
+// src/trpc-client.ts
+import { createTrpcClient } from '@analogjs/trpc';
+import { inject } from '@angular/core';
+import { injectRequest } from '@analogjs/router/tokens';
+import { createTrpcClientWithAuth } from '@analog-tools/auth/angular';
+import { AppRouter } from './server/trpc/routers';
+
+export const { provideTrpcClient, TrpcClient, TrpcHeaders } =
+  createTrpcClient<AppRouter>({ url: '/api/trpc' });
+
+export function injectTrpcClient() {
+  return createTrpcClientWithAuth(inject(TrpcClient), injectRequest(), TrpcHeaders);
+}
+```
+
+On the server, use `checkAuthentication` from `@analog-tools/auth` in a tRPC middleware to validate the session:
+
+```typescript
+// src/server/trpc/trpc.ts
+import { initTRPC, TRPCError } from '@trpc/server';
+import { checkAuthentication } from '@analog-tools/auth';
+
+const t = initTRPC.context<{ event: H3Event }>().create();
+
+const isAuthenticated = t.middleware(async ({ ctx, next }) => {
+  if (!(await checkAuthentication(ctx.event))) {
+    throw new TRPCError({ code: 'UNAUTHORIZED' });
+  }
+  return next({ ctx });
+});
+
+export const protectedProcedure = t.procedure.use(isAuthenticated);
+```

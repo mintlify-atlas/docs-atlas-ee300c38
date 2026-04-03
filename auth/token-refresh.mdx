@@ -1,0 +1,149 @@
+---
+title: "Token refresh"
+description: "Three token refresh strategies — lazy, proactive, and scheduled — and how to configure the bulk refresh endpoint for production CRON jobs."
+---
+
+`@analog-tools/auth` implements three complementary strategies for keeping access tokens valid. Together they ensure sessions stay alive without requiring users to log in repeatedly.
+
+## Refresh strategies
+
+<CardGroup cols={3}>
+  <Card title="Lazy refresh" icon="clock">
+    When a request arrives with an expired token, the middleware automatically attempts a refresh before returning a 401. The request is retried with the new token.
+  </Card>
+  <Card title="Proactive refresh" icon="bolt">
+    If a token is within 5 minutes of expiry, a background refresh fires without blocking the current request. The user experiences no delay.
+  </Card>
+  <Card title="Scheduled refresh" icon="calendar">
+    A CRON job hits `/api/auth/refresh-tokens` on a regular interval to bulk-refresh all sessions with tokens expiring soon. Recommended for production.
+  </Card>
+</CardGroup>
+
+## `TOKEN_REFRESH_SAFETY_MARGIN`
+
+The safety margin is a constant of **300 seconds (5 minutes)**. Both the proactive strategy and the scheduled bulk refresh use this value to determine whether a token is close enough to expiry to need refreshing.
+
+A token is refreshed proactively or by the CRON job when:
+
+```
+token_expiry - current_time < TOKEN_REFRESH_SAFETY_MARGIN (300s)
+```
+
+## Scheduled refresh with a CRON job
+
+For production deployments, configure a CRON job that hits the refresh endpoint every few minutes. The endpoint iterates all active sessions, refreshes tokens within the safety margin, and returns a summary.
+
+### Configuration
+
+Set `tokenRefreshApiKey` in your `AnalogAuthConfig` to secure the endpoint:
+
+```typescript
+const authConfig: AnalogAuthConfig = {
+  // ...other config
+  tokenRefreshApiKey: process.env['TOKEN_REFRESH_API_KEY'] || '',
+};
+```
+
+<Warning>
+  The `/api/auth/refresh-tokens` endpoint returns a 500 error if
+  `tokenRefreshApiKey` is not set. Configure it before scheduling a CRON job.
+</Warning>
+
+### CRON job
+
+Run this every 4 minutes to catch all tokens that will expire within the 5-minute safety margin:
+
+```bash
+# Every 4 minutes, refresh tokens expiring in the next 5 minutes
+curl -X GET https://your-app.com/api/auth/refresh-tokens \
+  -H "Authorization: Bearer YOUR_TOKEN_REFRESH_API_KEY"
+```
+
+On platforms that support scheduled functions, you can call the endpoint directly:
+
+<CodeGroup>
+
+```bash curl (shell / CI CRON)
+curl -X GET https://your-app.com/api/auth/refresh-tokens \
+  -H "Authorization: Bearer YOUR_TOKEN_REFRESH_API_KEY"
+```
+
+```typescript Vercel Cron Function
+// api/cron/refresh-tokens.ts
+export const config = { schedule: '*/4 * * * *' };
+
+export default async function handler() {
+  await fetch('https://your-app.com/api/auth/refresh-tokens', {
+    headers: {
+      Authorization: `Bearer ${process.env['TOKEN_REFRESH_API_KEY']}`,
+    },
+  });
+}
+```
+
+```typescript Cloudflare Workers Scheduled
+// scheduled worker
+export default {
+  async scheduled(event: ScheduledEvent, env: Env) {
+    await fetch('https://your-app.com/api/auth/refresh-tokens', {
+      headers: {
+        Authorization: `Bearer ${env.TOKEN_REFRESH_API_KEY}`,
+      },
+    });
+  },
+};
+```
+
+</CodeGroup>
+
+## Endpoint reference
+
+### `GET /api/auth/refresh-tokens`
+
+Bulk-refreshes all active sessions with tokens expiring within `TOKEN_REFRESH_SAFETY_MARGIN`.
+
+**Authentication:** `Authorization: Bearer <tokenRefreshApiKey>` header required.
+
+**Responses:**
+
+| Status | Body | Description |
+|---|---|---|
+| 200 | See below | Refresh job completed successfully. |
+| 401 | `{ message: 'Unauthorized' }` | Missing or incorrect API key. |
+| 500 | `{ message: 'Server configuration error' }` | `tokenRefreshApiKey` not configured. |
+| 500 | `{ message: 'Failed to refresh tokens' }` | Unexpected error during refresh. |
+
+**Success response:**
+
+```json
+{
+  "success": true,
+  "refreshed": 12,
+  "failed": 0,
+  "total": 45
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `success` | `boolean` | Always `true` when the job completed without a fatal error. |
+| `refreshed` | `number` | Number of sessions successfully refreshed. |
+| `failed` | `number` | Number of sessions where refresh failed (e.g., revoked refresh token). |
+| `total` | `number` | Total number of active sessions evaluated. |
+
+## Combining strategies
+
+The three strategies complement each other in production:
+
+| Scenario | Strategy used |
+|---|---|
+| User is active, token just expired | Lazy refresh — transparent to the user |
+| User is active, token expiring soon | Proactive refresh — background, no delay |
+| User is idle, token would expire | Scheduled refresh — CRON keeps the session alive |
+| Refresh token revoked (e.g., user logged out elsewhere) | Lazy refresh fails, user redirected to login |
+
+<Tip>
+  Set your CRON interval to slightly less than `TOKEN_REFRESH_SAFETY_MARGIN`
+  (e.g., every 4 minutes) to ensure no token expires between CRON runs before
+  the proactive refresh has a chance to fire.
+</Tip>

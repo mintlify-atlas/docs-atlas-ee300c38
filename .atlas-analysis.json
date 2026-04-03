@@ -1,0 +1,129 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "AnalogTools",
+  "projectDescription": "A collection of npm packages that extend AnalogJS with OAuth authentication, session management, dependency injection, structured logging, and Nx code generators.",
+  "theme": "palm",
+  "primaryColor": "#d10c33",
+  "lightColor": "#ec849c",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Authentication",
+            "pages": [
+              "auth/overview",
+              "auth/configuration",
+              "auth/route-protection",
+              "auth/angular-client",
+              "auth/token-refresh"
+            ]
+          },
+          {
+            "group": "Session Management",
+            "pages": [
+              "session/overview",
+              "session/storage-drivers",
+              "session/typed-sessions"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "inject/overview",
+              "logger/overview"
+            ]
+          },
+          {
+            "group": "Code Generators",
+            "pages": [
+              "generator/overview"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "@analog-tools/auth",
+            "pages": [
+              "api/auth",
+              "api/auth-angular"
+            ]
+          },
+          {
+            "group": "@analog-tools/session",
+            "pages": [
+              "api/session"
+            ]
+          },
+          {
+            "group": "@analog-tools/inject",
+            "pages": [
+              "api/inject"
+            ]
+          },
+          {
+            "group": "@analog-tools/logger",
+            "pages": [
+              "api/logger"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Backend-for-Frontend (BFF) OAuth 2.0/OIDC authentication — tokens stored server-side only",
+    "Pluggable session storage with unstorage drivers (Redis, Cloudflare KV, filesystem, etc.)",
+    "Symbol-based dependency injection with scoped registries and async initialization",
+    "Structured logging with deduplication, log sanitization, and pluggable formatters",
+    "Nx code generators for scaffolding libraries, API routes, and auth setup",
+    "Angular 19+ client integration with signals-based AuthService, route guards, and tRPC support",
+    "HMAC-SHA256 signed session cookies with secret rotation support",
+    "TypeScript-first APIs with strict type safety throughout"
+  ],
+  "publicApiSurface": [
+    "useAnalogAuth(config, event) — @analog-tools/auth",
+    "checkAuthentication(event) — @analog-tools/auth",
+    "AnalogAuthConfig — @analog-tools/auth",
+    "provideAuthClient() — @analog-tools/auth/angular",
+    "authInterceptor — @analog-tools/auth/angular",
+    "AuthService (isAuthenticated, user, login, logout, hasRoles) — @analog-tools/auth/angular",
+    "authGuard / roleGuard — @analog-tools/auth/angular",
+    "createTrpcClientWithAuth() — @analog-tools/auth/angular",
+    "useSession(event, config) — @analog-tools/session",
+    "getSession<T>(event) — @analog-tools/session",
+    "updateSession<T>(event, updater) — @analog-tools/session",
+    "destroySession(event) — @analog-tools/session",
+    "regenerateSession(event) — @analog-tools/session",
+    "createUnstorageStore(options) — @analog-tools/session",
+    "signCookie / unsignCookie — @analog-tools/session",
+    "@Injectable() decorator — @analog-tools/inject",
+    "inject<T>(token, options?) — @analog-tools/inject",
+    "injectAsync<T>(token, options?) — @analog-tools/inject",
+    "registerService<T>(token, ...args) — @analog-tools/inject",
+    "registerAsync<T>(token, ...args) — @analog-tools/inject",
+    "destroyAllServicesAsync() — @analog-tools/inject",
+    "InjectionContext (createScope, destroyScope, clearAll) — @analog-tools/inject",
+    "registerMockService / resetAllInjections — @analog-tools/inject",
+    "LoggerService — @analog-tools/logger",
+    "FormatterFactory (createConsole, createJson, createCustom) — @analog-tools/logger",
+    "ErrorSerializer.serialize() — @analog-tools/logger",
+    "createLoggerMiddleware() — @analog-tools/logger",
+    "withLogging() — @analog-tools/logger",
+    "@analog-tools/generator:library — Nx generator",
+    "@analog-tools/generator:api-route — Nx generator",
+    "@analog-tools/generator:init-auth — Nx generator"
+  ]
+}

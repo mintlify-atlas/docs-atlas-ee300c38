@@ -1,0 +1,341 @@
+---
+title: "@analog-tools/generator"
+description: "Nx code generators for scaffolding AnalogJS libraries, API routes, and authentication setup within an Nx monorepo."
+---
+
+`@analog-tools/generator` provides three Nx generators for scaffolding AnalogJS applications. They handle the boilerplate of creating libraries, API route handlers, and authentication wiring so you can focus on application logic.
+
+<Warning>
+  This package is in early development. Breaking changes may happen frequently as the APIs evolve.
+</Warning>
+
+<CardGroup cols={3}>
+  <Card title="library" icon="folder-open">
+    Scaffolds a new AnalogJS library under `libs/` with build configuration, TypeScript paths, and optional features.
+  </Card>
+  <Card title="api-route" icon="route">
+    Creates an H3 `defineEventHandler` file in the correct directory for AnalogJS file-based API routing.
+  </Card>
+  <Card title="init-auth" icon="lock">
+    Wires up `@analog-tools/auth` in an existing AnalogJS application with one command.
+  </Card>
+</CardGroup>
+
+## Installation
+
+```bash
+npm install -D @analog-tools/generator
+```
+
+Peer dependency:
+
+```bash
+npm install -D @nx/devkit
+```
+
+---
+
+## Library generator
+
+Scaffolds a new AnalogJS library under `libs/` with build configuration, TypeScript paths, and optional features (pages, API routes, tRPC, content routes).
+
+### Usage
+
+```bash
+npx nx generate @analog-tools/generator:library --name=my-feature --project=analog-example
+```
+
+Interactive mode (prompts for each option):
+
+```bash
+npx nx generate @analog-tools/generator:library
+```
+
+### Options
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `name` | `string` | Yes | — | Library name (used for directory, routes, and TS path alias) |
+| `project` | `string` | Yes | — | Application project to wire the library into |
+| `pages` | `boolean` | No | `false` | Generate file-based routing pages |
+| `api` | `boolean` | No | `false` | Generate an API route directory with an example handler |
+| `contentRoutes` | `boolean` | No | `false` | Generate a markdown content directory |
+| `trpc` | `boolean` | No | `false` | Generate tRPC router infrastructure (context, client, routers) |
+| `skipExamples` | `boolean` | No | `false` | Skip example files; create empty directories with `.gitkeep` instead |
+| `componentPrefix` | `string` | No | `lib` | Angular component selector prefix |
+| `patchTailwind` | `boolean` | No | `true` | Add the library's source paths to the application's Tailwind config |
+
+### Examples
+
+<CodeGroup>
+
+```bash Minimal (components and services only)
+npx nx g @analog-tools/generator:library \
+  --name=shared-ui \
+  --project=analog-example
+```
+
+```bash With file-based routing pages
+npx nx g @analog-tools/generator:library \
+  --name=admin-dashboard \
+  --project=analog-example \
+  --pages=true
+```
+
+```bash With REST API and tRPC
+npx nx g @analog-tools/generator:library \
+  --name=user-management \
+  --project=analog-example \
+  --api=true \
+  --trpc=true
+```
+
+```bash All features, no example files
+npx nx g @analog-tools/generator:library \
+  --name=core-lib \
+  --project=analog-example \
+  --pages=true \
+  --api=true \
+  --contentRoutes=true \
+  --trpc=true \
+  --skipExamples=true
+```
+
+</CodeGroup>
+
+### Generated directory structure
+
+With all options enabled (`--pages --api --contentRoutes --trpc`):
+
+```
+libs/my-feature/
+├── src/
+│   ├── index.ts                           # Public API barrel
+│   ├── test-setup.ts                      # Vitest setup
+│   ├── models/                            # Data models (example if --api)
+│   ├── lib/
+│   │   ├── components/                    # Angular components
+│   │   ├── pages/                         # Page components (if --pages)
+│   │   └── services/                      # Injectable services
+│   ├── pages/                             # File-based routes (if --pages)
+│   │   └── my-feature/
+│   │       ├── my-feature.page.ts         # Default route
+│   │       └── (my-feature).page.ts       # Layout route
+│   ├── content/                           # Markdown content (if --contentRoutes)
+│   │   └── my-feature/
+│   │       └── example-post.md
+│   └── backend/
+│       ├── index.ts                       # Backend barrel (if --api or --trpc)
+│       ├── api/routes/api/my-feature/
+│       │   ├── hello.ts                   # REST handler (if --api)
+│       │   └── trpc/[trpc].ts             # tRPC catch-all (if --trpc)
+│       └── trpc/                          # tRPC infrastructure (if --trpc)
+│           ├── context.ts
+│           ├── trpc.ts
+│           ├── trpc-client.ts
+│           └── routers/
+│               ├── index.ts
+│               └── my-feature.ts
+├── eslint.config.cjs
+├── package.json
+├── project.json
+├── README.md
+├── tsconfig.json
+├── tsconfig.lib.json
+├── tsconfig.spec.json
+└── vite.config.mts
+```
+
+### What gets auto-updated
+
+The generator automatically patches the target application:
+
+| File | What changes |
+|---|---|
+| Vite config | Adds the library's page and API paths to the AnalogJS plugin so Nitro discovers the routes |
+| `tsconfig.base.json` | Registers the library's barrel export as a TypeScript path alias |
+| Tailwind config | Appends the library's `src/` path to the `content` array (disable with `--patchTailwind=false`) |
+
+---
+
+## API Route generator
+
+Creates an H3 `defineEventHandler` file in the correct directory for AnalogJS file-based API routing.
+
+### Usage
+
+```bash
+npx nx generate @analog-tools/generator:api-route --project=analog-example --route=v1/hello
+```
+
+### Options
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `route` | `string` | Yes | — | Route path relative to the API directory (e.g., `v1/users` or `v1/users/[id]`) |
+| `project` | `string` | Yes | — | Target project (application or library) |
+| `method` | `string` | No | — | HTTP method for a method-specific handler: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` |
+
+**Output location:**
+- Applications: `<project-root>/src/server/routes/api/<route>.ts`
+- Libraries: `<project-root>/src/api/routes/api/<route>.ts`
+
+When `--method` is specified, the filename includes the method suffix (e.g., `users.post.ts`).
+
+### Examples
+
+<Steps>
+  <Step title="Generic handler (all HTTP methods)">
+    ```bash
+    npx nx g @analog-tools/generator:api-route \
+      --project=analog-example \
+      --route=v1/hello
+    ```
+
+    Creates `src/server/routes/api/v1/hello.ts`:
+
+    ```typescript
+    import { defineEventHandler } from 'h3';
+
+    export default defineEventHandler(async () => {
+      return {
+        status: 'ok',
+      };
+    });
+    ```
+  </Step>
+
+  <Step title="Method-specific handler">
+    ```bash
+    npx nx g @analog-tools/generator:api-route \
+      --project=analog-example \
+      --route=v1/users \
+      --method=POST
+    ```
+
+    Creates `src/server/routes/api/v1/users.post.ts`.
+  </Step>
+
+  <Step title="Dynamic route parameter">
+    ```bash
+    npx nx g @analog-tools/generator:api-route \
+      --project=analog-example \
+      --route=v1/users/[id]
+    ```
+
+    Creates `src/server/routes/api/v1/users/[id].ts`.
+  </Step>
+</Steps>
+
+### Dynamic segments
+
+Both syntaxes are supported for dynamic route parameters. Colon syntax (`:id`) is automatically converted to AnalogJS bracket notation (`[id]`):
+
+| Input | Output filename |
+|---|---|
+| `users/:id` | `users/[id].ts` |
+| `users/[id]` | `users/[id].ts` |
+
+---
+
+## Init Auth generator
+
+Configures `@analog-tools/auth` in an existing AnalogJS application. Only works with application projects (not libraries).
+
+### Usage
+
+```bash
+npx nx generate @analog-tools/generator:init-auth --project=my-app
+```
+
+### Options
+
+| Option | Type | Required | Description |
+|---|---|---|---|
+| `project` | `string` | Yes | The application project to configure |
+
+### What it creates
+
+The generator performs four operations:
+
+<Steps>
+  <Step title="Creates src/auth.config.ts">
+    OAuth/OIDC provider configuration with Redis session storage. Reads credentials from environment variables.
+  </Step>
+
+  <Step title="Creates src/server/middleware/auth.ts">
+    H3 middleware that calls `useAnalogAuth` on every request, protecting all routes not listed in `unprotectedRoutes`.
+  </Step>
+
+  <Step title="Updates src/app/app.config.ts">
+    Adds `provideAuthClient()` to the providers array and `authInterceptor` to the HTTP client interceptors.
+  </Step>
+
+  <Step title="Updates vite.config.ts">
+    Adds `@analog-tools/auth` to `ssr.noExternal` so Vite bundles it for server-side rendering.
+  </Step>
+</Steps>
+
+The generator also installs `@analog-tools/auth`, `@analog-tools/inject`, `@analog-tools/logger`, and `@analog-tools/session` if they are not already in `package.json`.
+
+**Generated structure:**
+
+```
+src/
+├── auth.config.ts                 # OAuth provider + session config
+├── app/
+│   └── app.config.ts              # Updated with auth providers
+└── server/
+    └── middleware/
+        └── auth.ts                # Auth middleware
+vite.config.ts                     # Updated with ssr.noExternal
+```
+
+### Post-generation steps
+
+<Steps>
+  <Step title="Set environment variables">
+    ```env
+    AUTH_ISSUER=https://your-auth-provider.com
+    AUTH_CLIENT_ID=your-client-id
+    AUTH_CLIENT_SECRET=your-client-secret
+    AUTH_AUDIENCE=your-api-audience
+    AUTH_SCOPE=openid profile email
+    AUTH_CALLBACK_URL=http://localhost:4200/api/auth/callback
+    REDIS_URL=redis://localhost:6379
+    SESSION_SECRET=your-secure-random-secret
+    ```
+  </Step>
+
+  <Step title="Start Redis (default session storage)">
+    <Tabs>
+      <Tab title="Docker">
+        ```bash
+        docker run -d -p 6379:6379 redis:alpine
+        ```
+      </Tab>
+      <Tab title="macOS">
+        ```bash
+        brew install redis && brew services start redis
+        ```
+      </Tab>
+      <Tab title="Ubuntu/Debian">
+        ```bash
+        sudo apt-get install redis-server && sudo systemctl start redis
+        ```
+      </Tab>
+    </Tabs>
+
+    <Note>
+      You can switch from Redis to any other [unstorage driver](https://unstorage.unjs.io/drivers) by modifying the `sessionStorage` block in `auth.config.ts`.
+    </Note>
+  </Step>
+
+  <Step title="Configure unprotected routes">
+    Open `auth.config.ts` and add any public routes that should bypass authentication to the `unprotectedRoutes` array.
+  </Step>
+
+  <Step title="Register the callback URL">
+    Register your callback URL with your OAuth provider. It must match `AUTH_CALLBACK_URL` exactly.
+  </Step>
+</Steps>

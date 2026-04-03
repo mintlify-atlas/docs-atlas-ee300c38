@@ -1,0 +1,265 @@
+---
+title: "Session management overview"
+description: "HMAC-SHA256 signed session cookies with pluggable unstorage backends for H3-based AnalogJS, Nitro, and Nuxt applications."
+---
+
+<Warning>
+  `@analog-tools/session` is in early development. Breaking changes may happen frequently as APIs evolve. Pin to a specific version in production.
+</Warning>
+
+`@analog-tools/session` provides session management for H3-based applications using a functional API. It signs session IDs with HMAC-SHA256, stores session data in any [unstorage](https://unstorage.unjs.io) backend, and exposes a small set of composable functions you call directly in your event handlers.
+
+## Installation
+
+<Tabs>
+  <Tab title="npm">
+    ```bash
+    npm install @analog-tools/session h3
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash
+    pnpm add @analog-tools/session h3
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash
+    yarn add @analog-tools/session h3
+    ```
+  </Tab>
+</Tabs>
+
+`h3` is a peer dependency and must be installed alongside the package.
+
+## Quick start
+
+```typescript
+import { defineEventHandler } from 'h3';
+import { useSession, getSession, updateSession, createUnstorageStore } from '@analog-tools/session';
+
+const store = await createUnstorageStore({
+  type: 'redis',
+  options: { url: 'redis://localhost:6379' },
+});
+
+export default defineEventHandler(async (event) => {
+  await useSession(event, {
+    store,
+    secret: process.env['SESSION_SECRET']!,
+    maxAge: 86400,
+  });
+
+  const session = getSession(event);
+
+  await updateSession(event, (data) => ({
+    visits: ((data['visits'] as number) || 0) + 1,
+    lastAccess: Date.now(),
+  }));
+
+  return { visits: getSession(event)?.['visits'] || 0 };
+});
+```
+
+<Steps>
+  <Step title="Create a store">
+    Call `createUnstorageStore` once at module level with your chosen driver. This returns an unstorage `Storage` instance.
+  </Step>
+  <Step title="Initialize the session">
+    Call `useSession(event, config)` at the top of each event handler. This reads and verifies the session cookie, loads data from the store, and sets a new signed cookie if needed.
+  </Step>
+  <Step title="Read session data">
+    Call `getSession(event)` anywhere after `useSession`. This is a synchronous read from the event context — it does not hit the storage backend.
+  </Step>
+  <Step title="Update session data">
+    Call `updateSession(event, updater)` to apply changes. The updater receives the current data and returns a partial object that is shallow-merged with existing data, then persisted to the store.
+  </Step>
+</Steps>
+
+## API reference
+
+### `useSession(event, config)`
+
+Initializes a session for an H3 event. You must call this before any other session function in the same event handler.
+
+- Reads the session cookie, verifies its HMAC-SHA256 signature, and loads session data from the store.
+- If no valid session exists, generates a new session ID using `nanoid`, sets a signed cookie, and persists initial data.
+- Stores the session config in the event context so `updateSession`, `destroySession`, and `regenerateSession` can access it without requiring the config again.
+
+```typescript
+await useSession(event, {
+  store,
+  secret: 'your-secret-key',
+  name: 'my-app-session',   // cookie name (default: 'connect.sid')
+  maxAge: 3600,              // TTL in seconds (default: 86400)
+  cookie: {
+    secure: true,
+    httpOnly: true,
+    sameSite: 'strict',
+  },
+  generate: () => ({ createdAt: Date.now() }),
+});
+```
+
+---
+
+### `getSession<T>(event): T | null`
+
+Returns the current session data from the event context, or `null` if no session has been initialized.
+
+```typescript
+interface UserSession {
+  userId?: string;
+  roles?: string[];
+}
+
+const session = getSession<UserSession>(event);
+if (session?.userId) {
+  // session is typed as UserSession
+}
+```
+
+This is a synchronous read from the event context — it does not hit the storage backend.
+
+---
+
+### `updateSession<T>(event, updater)`
+
+Applies partial updates to session data and persists the result to the store.
+
+The updater function receives the current session data and returns a partial object that is shallow-merged with the existing data:
+
+```typescript
+await updateSession<UserSession>(event, (current) => ({
+  lastActivity: Date.now(),
+  loginCount: (current.loginCount || 0) + 1,
+}));
+```
+
+<Warning>
+  Throws a `SessionError` with code `INVALID_SESSION` if `useSession` has not been called first on the same event.
+</Warning>
+
+---
+
+### `destroySession(event)`
+
+Removes the session from the store, clears the event context, and sets the cookie to expire immediately.
+
+```typescript
+await destroySession(event);
+```
+
+Safe to call when no session exists — returns without throwing.
+
+---
+
+### `regenerateSession<T>(event)`
+
+Generates a new session ID while preserving existing session data. The old session is removed from the store, and the cookie is updated with the new signed ID.
+
+Use this after authentication to prevent session fixation attacks:
+
+```typescript
+// After successful login
+await regenerateSession(event);
+await updateSession(event, () => ({ userId: user.id }));
+```
+
+<Warning>
+  Throws a `SessionError` with code `INVALID_SESSION` if no active session exists.
+</Warning>
+
+## Configuration
+
+### `SessionConfig`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `store` | `Storage<T>` | — | Required. An unstorage `Storage` instance created with `createUnstorageStore`. |
+| `secret` | `string \| string[]` | — | Required. Secret(s) for HMAC-SHA256 cookie signing. Pass an array to enable key rotation. |
+| `name` | `string` | `'connect.sid'` | Cookie name. |
+| `maxAge` | `number` | `86400` | Session TTL in seconds (24 hours). Controls the cookie lifetime only — does not automatically purge data from the store. |
+| `cookie` | `CookieOptions` | See below | Cookie configuration. |
+| `generate` | `() => T` | `() => ({})` | Function to generate initial session data for new sessions. |
+
+When `secret` is an array, the first secret signs new cookies. All secrets are tried when verifying existing cookies, enabling zero-downtime secret rotation.
+
+### `CookieOptions`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `domain` | `string` | — | Cookie domain. |
+| `path` | `string` | `'/'` | Cookie path. |
+| `secure` | `boolean` | `false` | Restrict cookie to HTTPS connections. Set to `true` in production. |
+| `httpOnly` | `boolean` | `true` | Prevent client-side JavaScript from accessing the cookie. |
+| `sameSite` | `boolean \| 'lax' \| 'strict' \| 'none'` | `'lax'` | Cross-site cookie policy. |
+
+## Error handling
+
+Session operations throw errors with a `code` property for programmatic handling:
+
+| Code | Trigger |
+|---|---|
+| `COOKIE_ERROR` | Failed to sign or set the session cookie. |
+| `INVALID_SESSION` | `updateSession` or `regenerateSession` called without a prior `useSession`. |
+| `CRYPTO_ERROR` | Unexpected error during session initialization (e.g., Web Crypto API unavailable). |
+| `STORAGE_ERROR` | Failed to read, write, or delete from the store. |
+| `EXPIRED_SESSION` | Session ID exists in the cookie but data is no longer in the store. |
+
+```typescript
+import { defineEventHandler, createError } from 'h3';
+import { useSession, getSession } from '@analog-tools/session';
+
+export default defineEventHandler(async (event) => {
+  try {
+    await useSession(event, sessionConfig);
+  } catch (err) {
+    const sessionErr = err as Error & { code?: string };
+    if (sessionErr.code === 'STORAGE_ERROR') {
+      throw createError({ statusCode: 503, statusMessage: 'Session storage unavailable' });
+    }
+    throw createError({ statusCode: 500, statusMessage: 'Session initialization failed' });
+  }
+
+  const session = getSession(event);
+  if (!session) {
+    throw createError({ statusCode: 401, statusMessage: 'No session' });
+  }
+
+  return { ok: true };
+});
+```
+
+## Security model
+
+`@analog-tools/session` is built around these security primitives:
+
+<CardGroup cols={2}>
+  <Card title="HMAC-SHA256 signatures" icon="shield-check">
+    Session IDs are signed using `crypto.subtle` from the Web Crypto API. Tampered or unsigned cookies are rejected silently — a new session is created instead.
+  </Card>
+  <Card title="Timing-safe comparison" icon="clock">
+    Signature verification uses a constant-time comparison loop to prevent timing-based attacks on the HMAC signature.
+  </Card>
+  <Card title="nanoid session IDs" icon="fingerprint">
+    Session IDs are 21 characters of URL-safe random characters, providing 126 bits of entropy. Generated with the `nanoid` library.
+  </Card>
+  <Card title="httpOnly cookies by default" icon="eye-slash">
+    Cookies are inaccessible to client-side JavaScript by default, preventing session theft via XSS.
+  </Card>
+</CardGroup>
+
+**Production recommendations:**
+
+- Set `cookie.secure: true` (requires HTTPS).
+- Use a secret of at least 32 random characters.
+- Use persistent storage (Redis, Cloudflare KV) — not the memory driver.
+- Set `sameSite: 'strict'` or `'lax'` based on your cross-origin requirements.
+- Call `regenerateSession` after any privilege escalation (e.g., login).
+
+## Known limitations
+
+- **No built-in session expiry cleanup.** Expired sessions remain in the store until explicitly removed or the storage driver handles TTL natively (Redis `EX`, Cloudflare KV `expirationTtl`). `maxAge` controls only the cookie lifetime.
+- **Memory driver has known issues.** Use Redis, file system, or another persistent driver for development and production. See [Storage drivers](/session/storage-drivers).
+- **No per-request locking.** Concurrent requests modifying the same session can produce race conditions. The last write wins.
+- **Web Crypto API required.** `crypto.subtle` is available in Node.js 15+, Deno, Cloudflare Workers, and modern browsers. Environments without Web Crypto will throw a `CRYPTO_ERROR` at runtime.

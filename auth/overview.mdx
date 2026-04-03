@@ -1,0 +1,154 @@
+---
+title: "Authentication overview"
+description: "OAuth 2.0/OIDC authentication for AnalogJS using the Backend-for-Frontend pattern — tokens stay on the server, never in the browser."
+---
+
+`@analog-tools/auth` implements the Backend-for-Frontend (BFF) authentication pattern for [AnalogJS](https://analogjs.org) applications. Access tokens, refresh tokens, and ID tokens are stored in a server-side session and are never sent to or stored in the browser.
+
+<Warning>
+  **Early development stage.** Breaking changes may occur frequently as APIs
+  evolve. Pin to a specific version in production.
+</Warning>
+
+## How the auth flow works
+
+<Steps>
+  <Step title="User initiates login">
+    The user clicks a login button. The browser navigates to `/api/auth/login`.
+  </Step>
+  <Step title="Server generates CSRF state token">
+    The server generates a UUID state token, stores it in the session, and
+    redirects the browser to your OAuth provider's authorization endpoint.
+  </Step>
+  <Step title="Provider authenticates the user">
+    The user logs in at the OAuth provider. The provider redirects back to
+    `/api/auth/callback` with an authorization code and the original state
+    parameter.
+  </Step>
+  <Step title="Server validates state and exchanges code">
+    The server verifies that the returned `state` matches the stored value
+    (CSRF protection), then exchanges the authorization code for tokens with the
+    provider.
+  </Step>
+  <Step title="Session created, signed cookie issued">
+    Tokens are stored in a server-side session (Redis, Cloudflare KV, etc.). The
+    browser receives only an HMAC-SHA256 signed session cookie. No tokens leave
+    the server.
+  </Step>
+</Steps>
+
+## Built-in routes
+
+A single middleware call registers all of the following routes automatically under `/api/auth/`:
+
+| Route | Method | Auth required | Description |
+|---|---|---|---|
+| `/api/auth/login` | GET | No | Redirects to the OAuth provider. Accepts `?redirect_uri=` for post-login destination. |
+| `/api/auth/callback` | GET | No | Handles the provider callback, validates state, and exchanges the authorization code for tokens. |
+| `/api/auth/logout` | GET | No | Revokes tokens, clears the session, and redirects to the provider logout endpoint. |
+| `/api/auth/authenticated` | GET | No | Returns `{ authenticated: boolean }`. |
+| `/api/auth/user` | GET | Yes | Returns the authenticated user object. |
+| `/api/auth/refresh-tokens` | GET | No* | Bulk refresh of expiring tokens. Requires `Authorization: Bearer <tokenRefreshApiKey>` header. |
+
+\* The refresh-tokens endpoint uses API key authentication rather than session authentication.
+
+## Security model
+
+| Mechanism | Details |
+|---|---|
+| Token storage | Tokens stored server-side only — never sent to the browser |
+| Session cookie | HMAC-SHA256 signed via `uncrypto`; `httpOnly`, `secure`, `sameSite: 'lax'` |
+| CSRF protection | OAuth `state` parameter (UUID per login, validated on callback) |
+| Token revocation | Both access and refresh tokens are revoked on logout |
+| Secure defaults | `secure` cookie flag enabled when `NODE_ENV=production` |
+| Resilience | Retry logic with exponential backoff for provider communication failures |
+
+<Note>
+  HTTPS is required in production. The `secure` cookie flag is automatically
+  enabled when `NODE_ENV=production`.
+</Note>
+
+## Installation
+
+<Tabs>
+  <Tab title="npm">
+    ```bash
+    npm install @analog-tools/auth
+    ```
+  </Tab>
+  <Tab title="pnpm">
+    ```bash
+    pnpm add @analog-tools/auth
+    ```
+  </Tab>
+  <Tab title="yarn">
+    ```bash
+    yarn add @analog-tools/auth
+    ```
+  </Tab>
+</Tabs>
+
+### Peer dependencies
+
+```bash
+npm install h3 uncrypto
+```
+
+For Angular client integration, also install:
+
+```bash
+npm install @analogjs/router @angular/core @angular/common @angular/router rxjs
+```
+
+## Quick start
+
+Create a server middleware file that runs on every request:
+
+```typescript
+// src/server/middleware/auth.ts
+import { defineEventHandler, H3Event } from 'h3';
+import { useAnalogAuth, AnalogAuthConfig } from '@analog-tools/auth';
+
+const authConfig: AnalogAuthConfig = {
+  issuer: process.env['AUTH_ISSUER'] || '',
+  clientId: process.env['AUTH_CLIENT_ID'] || '',
+  clientSecret: process.env['AUTH_CLIENT_SECRET'] || '',
+  scope: 'openid profile email',
+  callbackUri: process.env['AUTH_CALLBACK_URL'] || 'http://localhost:3000/api/auth/callback',
+  unprotectedRoutes: [
+    '/',
+    '/api/public/*',
+  ],
+  whitelistFileTypes: ['.css', '.js', '.png', '.svg', '.ico', '.woff2'],
+  sessionStorage: {
+    sessionSecret: process.env['SESSION_SECRET'] || 'change-me-in-production',
+    ttl: 86400,
+    driver: {
+      type: 'redis',
+      options: {
+        url: process.env['REDIS_URL'] || 'redis://localhost:6379',
+      },
+    },
+  },
+};
+
+export default defineEventHandler(async (event: H3Event) => {
+  return useAnalogAuth(authConfig, event);
+});
+```
+
+That single middleware call registers all auth routes and protects every route not listed in `unprotectedRoutes`.
+
+## Related packages
+
+<CardGroup cols={3}>
+  <Card title="@analog-tools/session" icon="database" href="https://github.com/MrBacony/analog-tools/tree/main/packages/session">
+    Session storage with pluggable unstorage drivers.
+  </Card>
+  <Card title="@analog-tools/inject" icon="plug" href="https://github.com/MrBacony/analog-tools/tree/main/packages/inject">
+    Lightweight service registry for dependency injection.
+  </Card>
+  <Card title="@analog-tools/logger" icon="scroll" href="https://github.com/MrBacony/analog-tools/tree/main/packages/logger">
+    Structured logging with deduplication.
+  </Card>
+</CardGroup>

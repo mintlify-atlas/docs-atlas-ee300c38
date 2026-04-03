@@ -1,97 +1,74 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "AnalogTools"
+description: "A collection of utilities and libraries that extend AnalogJS — the fullstack meta-framework for Angular — with authentication, session management, dependency injection, logging, and code generators."
 ---
 
-## Setting up
+AnalogTools is an open-source toolkit for [AnalogJS](https://analogjs.org) applications. Each package is independently installable and solves a specific challenge in fullstack Angular development.
 
-Get your documentation site up and running in minutes.
+<Warning>
+  AnalogTools is in early development. Breaking changes may happen frequently as APIs evolve. Pin to specific versions in production.
+</Warning>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Install packages and wire up authentication in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Authentication" icon="shield-halved" href="/auth/overview">
+    BFF OAuth 2.0/OIDC — tokens stay server-side, never in the browser
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Session Management" icon="database" href="/session/overview">
+    Pluggable session storage with Redis, Cloudflare KV, and more
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/auth">
+    Complete type signatures and parameter documentation
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Packages
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="@analog-tools/auth" icon="lock" href="/auth/overview">
+    OAuth 2.0/OIDC authentication using the Backend-for-Frontend pattern. Tokens are stored server-side only and never exposed to the browser.
+  </Card>
+  <Card title="@analog-tools/session" icon="cookie" href="/session/overview">
+    Session management with HMAC-SHA256 signed cookies and pluggable unstorage backends including Redis and Cloudflare KV.
+  </Card>
+  <Card title="@analog-tools/inject" icon="syringe" href="/inject/overview">
+    Symbol-based dependency injection with scoped registries, async initialization, and lifecycle hooks — no decorator metadata required.
+  </Card>
+  <Card title="@analog-tools/logger" icon="terminal" href="/logger/overview">
+    Structured logging with context-based child loggers, log deduplication, sensitive data sanitization, and pluggable formatters.
+  </Card>
+  <Card title="@analog-tools/generator" icon="wand-magic-sparkles" href="/generator/overview">
+    Nx code generators that scaffold AnalogJS libraries, API routes, and authentication setup with a single command.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## How it fits together
 
-## Need inspiration?
+The packages are designed to work together but are independently usable:
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+```
+@analog-tools/auth (server-side BFF authentication)
+    ├── @analog-tools/session  (session storage)
+    ├── @analog-tools/inject   (dependency injection)
+    └── @analog-tools/logger   (structured logging)
+
+@analog-tools/auth/angular (Angular client integration)
+    └── communicates with @analog-tools/auth via HTTP
+```
+
+<Steps>
+  <Step title="Install the packages you need">
+    Each package is independently published to npm. Install only what your project requires.
+  </Step>
+  <Step title="Initialize authentication (optional)">
+    Use the Nx generator to scaffold auth middleware, Angular providers, and Vite config in one command.
+  </Step>
+  <Step title="Protect your routes">
+    Configure `unprotectedRoutes` and let the middleware handle the rest — redirect to login, token refresh, and session validation are automatic.
+  </Step>
+  <Step title="Use Angular client services">
+    Inject `AuthService` in your components to access reactive `isAuthenticated()` and `user()` signals with no extra setup.
+  </Step>
+</Steps>

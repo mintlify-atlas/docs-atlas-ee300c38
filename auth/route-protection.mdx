@@ -1,0 +1,132 @@
+---
+title: "Route protection"
+description: "How @analog-tools/auth protects routes by default, how to configure unprotected routes and wildcard patterns, and how unauthenticated requests are handled."
+---
+
+By default, every route in your AnalogJS application requires a valid session. The only exceptions are the built-in auth routes (`/api/auth/login`, `/api/auth/callback`, `/api/auth/authenticated`) and any routes you explicitly list in `unprotectedRoutes`.
+
+## How protection works
+
+The `useAnalogAuth` middleware runs on every incoming request before any route handler. It:
+
+1. Skips the built-in auth routes unconditionally.
+2. Checks whether the request path matches any entry in `unprotectedRoutes` or a whitelisted file extension.
+3. If neither matches, validates the session and refreshes tokens if needed.
+4. If the session is invalid or missing, responds based on the request type (see [unauthenticated request handling](#unauthenticated-request-handling) below).
+
+## `unprotectedRoutes`
+
+Add paths to the `unprotectedRoutes` array in your `AnalogAuthConfig` to allow unauthenticated access:
+
+```typescript
+unprotectedRoutes: [
+  '/',              // Exact match (with or without trailing slash)
+  '/login',         // Exact match
+  '/api/public/*',  // Wildcard: matches /api/public/anything but NOT /api/public or /api/public/
+  '/docs/*',        // Wildcard: matches /docs/getting-started, /docs/api/auth, etc.
+]
+```
+
+### Matching rules
+
+| Pattern | Path | Matches? | Reason |
+|---|---|---|---|
+| `'/'` | `/` | Yes | Exact match |
+| `'/'` | `/home` | No | Not an exact match |
+| `'/api/public'` | `/api/public` | Yes | Exact match |
+| `'/api/public'` | `/api/public/` | Yes | Trailing slash normalized |
+| `'/api/public'` | `/api/public/data` | No | Not an exact match |
+| `'/api/public/*'` | `/api/public` | No | Wildcard requires content after prefix |
+| `'/api/public/*'` | `/api/public/` | No | Only trailing slash — no content after prefix |
+| `'/api/public/*'` | `/api/public/data` | Yes | Has content after prefix |
+
+<Warning>
+  Wildcard patterns require actual path content after the prefix. `/api/public/*`
+  does **not** match `/api/public` or `/api/public/` — there must be a path
+  segment after the slash.
+</Warning>
+
+## Unauthenticated request handling
+
+The middleware distinguishes between browser navigation requests and programmatic API calls using the `fetch: 'true'` header set by the [Angular auth interceptor](/auth/angular-client#authinterceptor).
+
+| Request type | Response |
+|---|---|
+| Browser request (no `fetch: 'true'` header) | 302 redirect to `/api/auth/login` |
+| API/fetch request (`fetch: 'true'` header present) | 401 Unauthorized |
+
+This means SPA navigation automatically triggers a login redirect, while your HTTP client receives a 401 it can handle programmatically.
+
+## `whitelistFileTypes`
+
+Static assets don't need session validation. Use `whitelistFileTypes` to skip auth checks for requests whose URL ends with a matching extension:
+
+```typescript
+whitelistFileTypes: ['.css', '.js', '.png', '.svg', '.ico', '.woff2', '.jpg']
+```
+
+This check runs before route matching, so it adds minimal overhead to static asset requests. Extensions are case-insensitive and the leading dot is optional.
+
+<Tip>
+  Include every file extension your build outputs — missing an extension causes
+  the middleware to validate the session for static asset requests, which adds
+  latency and may cause unexpected redirects.
+</Tip>
+
+## Common setups
+
+### SPA with a public landing page
+
+```typescript
+unprotectedRoutes: [
+  '/',          // Landing page
+  '/login',     // Login page (if you have a custom one)
+  '/register',
+],
+whitelistFileTypes: ['.css', '.js', '.png', '.svg', '.ico', '.woff2'],
+```
+
+### API-only protection (public frontend)
+
+If your frontend routes are all public and only your API needs protection, invert the pattern using wildcards:
+
+```typescript
+unprotectedRoutes: [
+  '/*',           // All frontend routes
+  '/api/public/*',
+],
+```
+
+### Multi-tenant with a public docs section
+
+```typescript
+unprotectedRoutes: [
+  '/',
+  '/docs/*',
+  '/api/public/*',
+  '/api/health',
+],
+whitelistFileTypes: ['.css', '.js', '.png', '.svg', '.ico', '.woff2'],
+```
+
+## tRPC routes
+
+The middleware automatically bypasses session checks for `/api/trpc` routes. Authentication within tRPC procedures is handled separately using `checkAuthentication`:
+
+```typescript
+// src/server/trpc/trpc.ts
+import { initTRPC, TRPCError } from '@trpc/server';
+import { checkAuthentication } from '@analog-tools/auth';
+
+const t = initTRPC.context<{ event: H3Event }>().create();
+
+const isAuthenticated = t.middleware(async ({ ctx, next }) => {
+  if (!(await checkAuthentication(ctx.event))) {
+    throw new TRPCError({ code: 'UNAUTHORIZED' });
+  }
+  return next({ ctx });
+});
+
+export const publicProcedure = t.procedure;
+export const protectedProcedure = t.procedure.use(isAuthenticated);
+```

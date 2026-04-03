@@ -1,0 +1,566 @@
+---
+title: "@analog-tools/logger"
+description: "Structured logging for AnalogJS, Nitro, and H3 applications with context-based child loggers, deduplication, and pluggable formatters."
+---
+
+## Overview
+
+`@analog-tools/logger` provides structured logging with context-based child loggers, log deduplication, error serialization with circular reference handling, and pluggable output formatters. The default formatter outputs ANSI-colored terminal output; a JSON formatter is included for log aggregation pipelines.
+
+```typescript
+import { LoggerService } from '@analog-tools/logger';
+
+const logger = new LoggerService({ level: 'info', name: 'my-app' });
+
+logger.info('Server started on port 3000');
+logger.warn('Cache miss for key user:123');
+logger.error('Failed to connect', new Error('ECONNREFUSED'));
+
+const dbLogger = logger.forContext('database');
+dbLogger.debug('Query executed in 42ms');
+```
+
+---
+
+## LoggerService
+
+The main logging class. Decorated with `@Injectable()` so it can be registered and injected via `@analog-tools/inject`. Can also be used standalone via direct instantiation.
+
+### Constructor
+
+<ParamField path="config" type="LoggerConfig">
+  Optional configuration. See [LoggerConfig](#loggerconfig).
+</ParamField>
+
+```typescript
+const logger = new LoggerService({
+  level: 'debug',
+  name: 'my-app',
+  useColors: true,
+});
+```
+
+### Log Methods
+
+All log methods accept `LogMessage` — either a plain string or a zero-argument function that returns a string (lazy evaluation). The function is only called if the message will actually be logged.
+
+<ResponseField name="trace(message, ...data)" type="void">
+  Granular diagnostics — function entry/exit, variable values. Numeric level: `0`.
+</ResponseField>
+
+<ResponseField name="debug(message, ...data)" type="void">
+  Development-time debugging. Numeric level: `1`.
+</ResponseField>
+
+<ResponseField name="info(message, ...data)" type="void">
+  Normal operational events. Numeric level: `2`.
+</ResponseField>
+
+<ResponseField name="warn(message, ...data)" type="void">
+  Recoverable issues, deprecation notices. Numeric level: `3`.
+</ResponseField>
+
+<ResponseField name="error(messageOrError, ...args)" type="void">
+  Failures requiring attention. Accepts a string, an `Error` object, or a string plus an `Error`. Numeric level: `4`. Bypasses deduplication.
+</ResponseField>
+
+<ResponseField name="fatal(messageOrError, ...args)" type="void">
+  Unrecoverable errors, imminent shutdown. Same signature as `error`. Numeric level: `5`. Bypasses deduplication.
+</ResponseField>
+
+```typescript
+// All these signatures are valid for error/fatal:
+logger.error('Connection refused');
+logger.error(new Error('ECONNREFUSED'));
+logger.error('Database query failed', new Error('timeout'));
+logger.error('Payment failed', paymentError, { orderId: 'ord-123' });
+
+// Lazy evaluation — JSON.stringify only runs at debug level
+logger.debug(() => JSON.stringify(largeObject));
+```
+
+### Child Loggers
+
+<ResponseField name="forContext(context)" type="LoggerService">
+  Creates a child logger with the given context label appended to output. Child loggers share config with the parent but produce labeled output: `[my-app:context]`. Results are cached — calling `forContext('db')` twice returns the same instance.
+
+  <ParamField path="context" type="string" required>
+    Context label to append.
+  </ParamField>
+
+  ```typescript
+  const authLogger = logger.forContext('auth');
+  authLogger.info('User authenticated');
+  // Output: [my-app:auth] User authenticated
+  ```
+</ResponseField>
+
+### Grouping
+
+<ResponseField name="group(groupName)" type="void">
+  Starts a visual log group using `console.group`. Nested groups are supported.
+</ResponseField>
+
+<ResponseField name="groupEnd(groupName?)" type="void">
+  Ends a log group. Omit `groupName` to end the most recently opened group.
+</ResponseField>
+
+```typescript
+logger.group('Database Migration');
+logger.info('Running migration 001_create_users');
+logger.groupEnd('Database Migration');
+```
+
+### Configuration Methods
+
+<ResponseField name="getLogLevel()" type="LogLevelEnum">
+  Returns the current log level as a `LogLevelEnum` numeric value.
+</ResponseField>
+
+<ResponseField name="getDisabledContexts()" type="string[]">
+  Returns the list of suppressed context names.
+</ResponseField>
+
+<ResponseField name="setDisabledContexts(contexts: string[])" type="void">
+  Replaces the disabled contexts list at runtime.
+
+  ```typescript
+  logger.setDisabledContexts(['health-check', 'polling']);
+  ```
+</ResponseField>
+
+<ResponseField name="setUseColors(enabled: boolean)" type="void">
+  Enables or disables ANSI color output at runtime.
+</ResponseField>
+
+<ResponseField name="getUseColors()" type="boolean">
+  Returns whether ANSI colors are enabled.
+</ResponseField>
+
+<ResponseField name="setCorrelationId(id: string)" type="void">
+  Attaches a correlation ID to all subsequent log entries from this logger instance. Appears in both console and JSON output.
+</ResponseField>
+
+<ResponseField name="getCorrelationId()" type="string | undefined">
+  Returns the current correlation ID, or `undefined` if not set.
+</ResponseField>
+
+<ResponseField name="clearCorrelationId()" type="void">
+  Removes the correlation ID from this logger instance.
+</ResponseField>
+
+---
+
+## LoggerConfig
+
+<ResponseField name="level" type="LogLevel">
+  Minimum log level to output. Messages below this level are discarded without evaluation. Default: `'info'` (or `LOG_LEVEL` env var).
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Logger name shown in output. Default: `'analog-tools'`.
+</ResponseField>
+
+<ResponseField name="disabledContexts" type="string[]">
+  Context names whose output is suppressed, even if the level would otherwise allow it. Can also be set via `LOG_DISABLED_CONTEXTS` env var (comma-separated).
+</ResponseField>
+
+<ResponseField name="useColors" type="boolean">
+  Whether to include ANSI color codes in console output. Default: `true`.
+</ResponseField>
+
+<ResponseField name="formatter" type="ILogFormatter">
+  Output formatter instance. Default: `ConsoleFormatter`. Use `FormatterFactory` to create alternatives.
+</ResponseField>
+
+<ResponseField name="correlationId" type="string">
+  Initial correlation ID for request-scoped tracing.
+</ResponseField>
+
+<ResponseField name="styles" type="Partial<Record<SemanticStyleName, StyleConfig>>">
+  Custom style overrides for semantic style names (`highlight`, `accent`, `attention`, `success`, `warning`, `error`, `info`, `debug`).
+</ResponseField>
+
+<ResponseField name="icons" type="Partial<Record<string, Icon>>">
+  Custom icon assignments for semantic icon names (`success`, `warning`, `error`, `info`, `debug`).
+</ResponseField>
+
+<ResponseField name="deduplication" type="object">
+  Log deduplication settings.
+
+  <Expandable title="Deduplication options">
+    <ResponseField name="enabled" type="boolean" required>
+      Whether deduplication is active. Default: `false`.
+    </ResponseField>
+    <ResponseField name="windowMs" type="number">
+      Batch window in milliseconds. Default: `5000`.
+    </ResponseField>
+    <ResponseField name="flushOnCritical" type="boolean">
+      Whether to flush pending messages immediately on `error` or `fatal`. Default: `true`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="sanitization" type="SanitizationConfig">
+  Log sanitization settings. Enabled by default with secure patterns that redact passwords, tokens, emails, credit card numbers, and IP addresses.
+
+  <Expandable title="Sanitization options">
+    <ResponseField name="enabled" type="boolean">
+      Master switch for sanitization. Default: `true`.
+    </ResponseField>
+    <ResponseField name="rules" type="SanitizationRule[]">
+      Replaces the default rules entirely.
+    </ResponseField>
+    <ResponseField name="customRules" type="SanitizationRule[]">
+      Appended to the default rules.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## LogLevel Type
+
+`type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'silent'`
+
+| Level | Numeric | Use Case |
+|-------|:-------:|----------|
+| `trace` | 0 | Granular diagnostics, function entry/exit |
+| `debug` | 1 | Development-time debugging |
+| `info` | 2 | Normal operational events |
+| `warn` | 3 | Recoverable issues, deprecation notices |
+| `error` | 4 | Failures requiring attention |
+| `fatal` | 5 | Unrecoverable errors, imminent shutdown |
+| `silent` | 6 | Suppresses all output |
+
+---
+
+### `isValidLogLevel(level)`
+
+Type guard that returns `true` if `level` is a valid `LogLevel` string. Use this to validate `LOG_LEVEL` env vars at runtime.
+
+<ParamField path="level" type="string" required>
+  The string to validate.
+</ParamField>
+
+**Returns:** `level is LogLevel`
+
+```typescript
+const envLevel = process.env['LOG_LEVEL'] || 'info';
+if (isValidLogLevel(envLevel)) {
+  new LoggerService({ level: envLevel });
+}
+```
+
+---
+
+## FormatterFactory
+
+Static factory class for creating log output formatters.
+
+<ResponseField name="FormatterFactory.createConsole(config?)" type="ILogFormatter">
+  Creates a `ConsoleFormatter` with ANSI-colored terminal output.
+
+  <ParamField path="config.useColors" type="boolean">
+    Whether to include ANSI color codes. Default: `true`.
+  </ParamField>
+
+  ```typescript
+  const logger = new LoggerService({
+    formatter: FormatterFactory.createConsole({ useColors: false }),
+  });
+  ```
+</ResponseField>
+
+<ResponseField name="FormatterFactory.createJson(config?)" type="ILogFormatter">
+  Creates a `JsonFormatter` that outputs one JSON object per line.
+
+  <ParamField path="config.prettyPrint" type="boolean">
+    Whether to format JSON with indentation for readability.
+  </ParamField>
+
+  ```typescript
+  const logger = new LoggerService({
+    formatter: FormatterFactory.createJson(),
+  });
+  // Output: {"timestamp":"...","level":"info","logger":"my-app","message":"..."}
+  ```
+</ResponseField>
+
+<ResponseField name="FormatterFactory.createCustom(fn)" type="ILogFormatter">
+  Creates a formatter from a function `(entry: LogEntry) => string`.
+
+  <ParamField path="fn" type="(entry: LogEntry) => string" required>
+    Custom formatting function.
+  </ParamField>
+
+  ```typescript
+  const logger = new LoggerService({
+    formatter: FormatterFactory.createCustom((entry) => {
+      return `${entry.timestamp.toISOString()} [${entry.level}] ${entry.message}`;
+    }),
+  });
+  ```
+</ResponseField>
+
+---
+
+## LogEntry Interface
+
+The object passed to custom formatters and the `LogDeduplicator`.
+
+<ResponseField name="level" type="LogLevelEnum" required>
+  Numeric log level.
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  The log message string.
+</ResponseField>
+
+<ResponseField name="logger" type="string" required>
+  The logger name (from `LoggerConfig.name`).
+</ResponseField>
+
+<ResponseField name="timestamp" type="Date" required>
+  When the log entry was created.
+</ResponseField>
+
+<ResponseField name="context" type="string">
+  Child logger context label (if `forContext()` was used).
+</ResponseField>
+
+<ResponseField name="metadata" type="Record<string, unknown>">
+  Structured key-value data passed as additional arguments.
+</ResponseField>
+
+<ResponseField name="error" type="Error">
+  Attached error object (for `error()` and `fatal()` calls).
+</ResponseField>
+
+<ResponseField name="styling" type="LogStyling">
+  Visual styling and icon configuration.
+</ResponseField>
+
+<ResponseField name="correlationId" type="string">
+  Request-scoped correlation ID.
+</ResponseField>
+
+---
+
+## ErrorSerializer
+
+Utility class for safely serializing errors and arbitrary objects for logging. Handles circular references, deep object graphs, `Error.cause` chains, and non-enumerable properties. Results are cached (up to 100 entries) based on error identity.
+
+### `ErrorSerializer.serialize(error, options?)`
+
+<ParamField path="error" type="unknown" required>
+  The value to serialize — any `Error`, plain object, string, or primitive.
+</ParamField>
+
+<ParamField path="options.includeStack" type="boolean">
+  Whether to include stack traces. Default: `true`.
+</ParamField>
+
+<ParamField path="options.maxDepth" type="number">
+  Maximum object traversal depth. Default: `10`.
+</ParamField>
+
+<ParamField path="options.includeNonEnumerable" type="boolean">
+  Whether to include non-enumerable properties. Default: `false`.
+</ParamField>
+
+**Returns:** `StructuredError | string`
+
+```typescript
+import { ErrorSerializer } from '@analog-tools/logger';
+
+const serialized = ErrorSerializer.serialize(error, {
+  includeStack: false,
+  maxDepth: 5,
+  includeNonEnumerable: true,
+});
+```
+
+---
+
+## LogDeduplicator
+
+Batches identical messages within a configurable time window and outputs them with a repeat count. Only simple messages (no metadata or extra data) are deduplicated. Error and fatal messages always bypass deduplication.
+
+### Constructor
+
+<ParamField path="config" type="DeduplicationConfig" required>
+  Deduplication settings (`enabled`, `windowMs`, `flushOnCritical`).
+</ParamField>
+
+<ParamField path="formatter" type="ILogFormatter" required>
+  The formatter used when flushing batched messages.
+</ParamField>
+
+<ParamField path="loggerName" type="string" required>
+  The logger name included in flushed output.
+</ParamField>
+
+### Methods
+
+<ResponseField name="addMessage(level, message, context?)" type="boolean">
+  Adds a message to the deduplicator. Returns `true` if the message should be logged immediately (deduplication disabled, or critical level); returns `false` if the message was batched.
+
+  <ParamField path="level" type="LogLevelEnum" required>Numeric log level.</ParamField>
+  <ParamField path="message" type="string" required>The message text.</ParamField>
+  <ParamField path="context" type="string">Optional child logger context.</ParamField>
+</ResponseField>
+
+<ResponseField name="flush()" type="void">
+  Immediately outputs all batched messages and clears the buffer.
+</ResponseField>
+
+<ResponseField name="destroy()" type="void">
+  Cancels any pending flush timer and clears the buffer without outputting.
+</ResponseField>
+
+```typescript
+const logger = new LoggerService({
+  level: 'info',
+  name: 'my-app',
+  deduplication: { enabled: true, windowMs: 5000, flushOnCritical: true },
+});
+
+logger.info('Retrying connection...');
+logger.info('Retrying connection...');
+logger.info('Retrying connection...');
+// After 5s: [my-app] Retrying connection... (×3)
+```
+
+---
+
+## Nitro Utilities
+
+Both utilities require `@analog-tools/inject` and use `inject(LoggerService)` internally. Register `LoggerService` with `registerService` before using them.
+
+### `createLoggerMiddleware(namespace?)`
+
+Creates a Nitro event handler that attaches a context logger to `event.context['logger']` and logs incoming requests at debug level.
+
+<ParamField path="namespace" type="string">
+  Context name for the attached logger. Default: `'api'`.
+</ParamField>
+
+**Returns:** `EventHandler`
+
+```typescript
+// src/server/middleware/logging.ts
+import { createLoggerMiddleware } from '@analog-tools/logger';
+
+export default createLoggerMiddleware('api');
+// event.context['logger'] is now a LoggerService instance
+```
+
+---
+
+### `withLogging(handler, options?)`
+
+Wraps a Nitro event handler with request timing and error logging.
+
+<ParamField path="handler" type="EventHandler<T>" required>
+  The original event handler to wrap.
+</ParamField>
+
+<ParamField path="options.namespace" type="string">
+  Context name for log output. Default: `'api'`.
+</ParamField>
+
+<ParamField path="options.level" type="LogLevel">
+  Log level for successful request logs. Default: `'debug'`.
+</ParamField>
+
+<ParamField path="options.logResponse" type="boolean">
+  Whether to include the response body in the success log. Default: `false`.
+</ParamField>
+
+**Returns:** `EventHandler<T>`
+
+```typescript
+import { defineEventHandler } from 'h3';
+import { withLogging } from '@analog-tools/logger';
+
+export default withLogging(
+  defineEventHandler(() => ({ products: [] })),
+  { namespace: 'products-api', level: 'info' }
+);
+// Success: "[my-app:products-api] Request completed in 12ms"
+// Error:   "[my-app:products-api] Request failed after 45ms" + serialized error
+```
+
+---
+
+## LoggerError
+
+Thrown by `LoggerService` when initialized with an invalid log level.
+
+```typescript
+import { LoggerError } from '@analog-tools/logger';
+
+try {
+  new LoggerService({ level: 'verbose' as LogLevel }); // throws
+} catch (e) {
+  if (e instanceof LoggerError) {
+    // "Invalid log level: verbose. Valid levels: trace, debug, info, warn, error, fatal, silent."
+  }
+}
+```
+
+---
+
+## ColorEnum
+
+ANSI escape code constants for use in custom styles. Available via `import { ColorEnum } from '@analog-tools/logger'`.
+
+<ResponseField name="Blue shades" type="enum">
+  `SkyBlue`, `OceanBlue`, `MidnightBlue` — plus `*Bg` background variants.
+</ResponseField>
+
+<ResponseField name="Green shades" type="enum">
+  `MintGreen`, `ForestGreen`, `EmeraldGreen` — plus `*Bg` variants.
+</ResponseField>
+
+<ResponseField name="Yellow shades" type="enum">
+  `LemonYellow`, `SunflowerYellow`, `GoldYellow` — plus `*Bg` variants.
+</ResponseField>
+
+<ResponseField name="Red shades" type="enum">
+  `RoseRed`, `FireRed`, `BurgundyRed` — plus `*Bg` variants.
+</ResponseField>
+
+<ResponseField name="Purple shades" type="enum">
+  `LavenderPurple`, `RoyalPurple`, `DeepPurple` — plus `*Bg` variants.
+</ResponseField>
+
+<ResponseField name="Orange shades" type="enum">
+  `PeachOrange`, `TangerineOrange`, `AmberOrange` — plus `*Bg` variants.
+</ResponseField>
+
+<ResponseField name="Gray shades" type="enum">
+  `SilverGray`, `SlateGray`, `CharcoalGray` — plus `*Bg` variants.
+</ResponseField>
+
+<ResponseField name="Black and White" type="enum">
+  `PureBlack`, `PureWhite`, `Cyan` — plus `*Bg` variants.
+</ResponseField>
+
+<ResponseField name="Text formatting" type="enum">
+  `Reset`, `Bold`, `Dim`, `Underline`, `Blink`, `Reverse`, `Hidden`
+</ResponseField>
+
+```typescript
+import { LoggerService, ColorEnum } from '@analog-tools/logger';
+
+const logger = new LoggerService({
+  styles: {
+    highlight: { color: ColorEnum.LemonYellow, bold: true },
+    success: { color: ColorEnum.ForestGreen },
+  },
+});
+
+logger.info('Deployment complete', { style: 'success', icon: '✅' });
+```

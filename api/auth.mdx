@@ -1,0 +1,298 @@
+---
+title: "@analog-tools/auth"
+description: "Server-side OAuth 2.0/OIDC authentication for AnalogJS using the Backend-for-Frontend pattern."
+---
+
+## Overview
+
+`@analog-tools/auth` implements the BFF (Backend-for-Frontend) authentication pattern for AnalogJS and H3/Nitro applications. OAuth tokens are stored server-side only and never exposed to the browser. A single middleware call registers all auth routes and protects your application.
+
+```typescript
+// src/server/middleware/auth.ts
+import { defineEventHandler, H3Event } from 'h3';
+import { useAnalogAuth, AnalogAuthConfig } from '@analog-tools/auth';
+
+const authConfig: AnalogAuthConfig = {
+  issuer: process.env['AUTH_ISSUER'] || '',
+  clientId: process.env['AUTH_CLIENT_ID'] || '',
+  clientSecret: process.env['AUTH_CLIENT_SECRET'] || '',
+  scope: 'openid profile email',
+  callbackUri: process.env['AUTH_CALLBACK_URL'] || 'http://localhost:3000/api/auth/callback',
+  sessionStorage: {
+    sessionSecret: process.env['SESSION_SECRET'] || 'change-me-in-production',
+    driver: { type: 'redis', options: { url: process.env['REDIS_URL'] || 'redis://localhost:6379' } },
+  },
+};
+
+export default defineEventHandler(async (event: H3Event) => {
+  return useAnalogAuth(authConfig, event);
+});
+```
+
+---
+
+## Functions
+
+### `useAnalogAuth(config, event)`
+
+Initializes the OAuth authentication service, registers all built-in auth routes, and runs the middleware guard for the current request. Call this from a Nitro middleware that runs on every request.
+
+<ParamField path="config" type="AnalogAuthConfig" required>
+  Full auth configuration. See [AnalogAuthConfig](#analogauthconfig) below.
+</ParamField>
+
+<ParamField path="event" type="H3Event" required>
+  The H3 event object from the current request handler.
+</ParamField>
+
+**Returns:** `Promise<void | Response>` — resolves after the middleware runs. Returns a redirect or JSON response for auth routes; resolves to `void` for pass-through requests.
+
+**Throws:** `Error` if any mandatory configuration field (`issuer`, `clientId`, `clientSecret`, `callbackUri`) is missing.
+
+```typescript
+export default defineEventHandler(async (event: H3Event) => {
+  return useAnalogAuth(authConfig, event);
+});
+```
+
+---
+
+### `checkAuthentication(event)`
+
+Checks whether the current request has a valid authenticated session. Use this in tRPC middlewares or custom API route guards.
+
+<ParamField path="event" type="H3Event" required>
+  The H3 event object for the current request.
+</ParamField>
+
+**Returns:** `Promise<boolean>` — `true` if a valid session with a non-expired token exists, `false` otherwise. Attempts a token refresh if the token is expired.
+
+```typescript
+import { initTRPC, TRPCError } from '@trpc/server';
+import { checkAuthentication } from '@analog-tools/auth';
+
+const t = initTRPC.context<{ event: H3Event }>().create();
+
+const isAuthenticated = t.middleware(async ({ ctx, next }) => {
+  if (!(await checkAuthentication(ctx.event))) {
+    throw new TRPCError({ code: 'UNAUTHORIZED' });
+  }
+  return next({ ctx });
+});
+
+export const protectedProcedure = t.procedure.use(isAuthenticated);
+```
+
+---
+
+## Types
+
+### `AnalogAuthConfig`
+
+Top-level configuration object passed to `useAnalogAuth`.
+
+<ResponseField name="issuer" type="string" required>
+  OAuth/OIDC provider URL. The package fetches `{issuer}/.well-known/openid-configuration` and caches it for 1 hour. Example: `https://auth.example.com/realms/my-realm`
+</ResponseField>
+
+<ResponseField name="clientId" type="string" required>
+  OAuth client ID registered with your provider.
+</ResponseField>
+
+<ResponseField name="clientSecret" type="string" required>
+  OAuth client secret. Keep this in environment variables — never commit it.
+</ResponseField>
+
+<ResponseField name="callbackUri" type="string" required>
+  Full callback URL registered with your OAuth provider, including protocol and port. Must exactly match the provider registration. Example: `https://myapp.com/api/auth/callback`
+</ResponseField>
+
+<ResponseField name="scope" type="string" required>
+  OAuth scopes to request. Example: `"openid profile email"`
+</ResponseField>
+
+<ResponseField name="sessionStorage" type="SessionStorageConfig" required>
+  Session storage configuration. See [SessionStorageConfig](#sessionstorageconfig).
+</ResponseField>
+
+<ResponseField name="audience" type="string">
+  API audience identifier. Required by some providers (e.g., Auth0).
+</ResponseField>
+
+<ResponseField name="unprotectedRoutes" type="string[]">
+  Routes that bypass authentication. Supports exact matches and wildcard patterns (`/api/public/*`). All other routes require a valid session.
+</ResponseField>
+
+<ResponseField name="whitelistFileTypes" type="string[]">
+  File extensions that bypass authentication. Extensions are normalized (case-insensitive, leading dot optional). Example: `['.css', '.js', '.png', '.svg', '.ico', '.woff2']`
+</ResponseField>
+
+<ResponseField name="tokenRefreshApiKey" type="string">
+  API key used to authenticate the `/api/auth/refresh-tokens` bulk refresh endpoint. Required to use the scheduled refresh strategy.
+</ResponseField>
+
+<ResponseField name="logoutUrl" type="string">
+  URL to redirect to after OAuth provider logout completes. Defaults to the provider's post-logout redirect.
+</ResponseField>
+
+<ResponseField name="userHandler" type="UserHandler">
+  Optional callbacks for customizing user data persistence and transformation. See [UserHandler](#userhandler).
+</ResponseField>
+
+---
+
+### `SessionStorageConfig`
+
+Configures how sessions are stored. Uses `@analog-tools/session` with unstorage drivers.
+
+<ResponseField name="sessionSecret" type="string">
+  Secret key used for HMAC-SHA256 cookie signing. Use at least 32 random characters in production.
+</ResponseField>
+
+<ResponseField name="ttl" type="number">
+  Session time-to-live in seconds. Default: `86400` (24 hours).
+</ResponseField>
+
+<ResponseField name="prefix" type="string">
+  Optional key prefix in the storage backend.
+</ResponseField>
+
+<ResponseField name="driver" type="DriverOptions" required>
+  Driver configuration. A discriminated union — the `type` field determines which `options` are valid.
+
+  <Expandable title="Driver examples">
+    **Redis (URL)**
+    ```typescript
+    driver: {
+      type: 'redis',
+      options: { url: 'redis://localhost:6379' },
+    }
+    ```
+
+    **Redis (host/port)**
+    ```typescript
+    driver: {
+      type: 'redis',
+      options: { host: 'localhost', port: 6379, password: 'secret', db: 0 },
+    }
+    ```
+
+    **Cloudflare KV**
+    ```typescript
+    driver: {
+      type: 'cloudflare-kv-binding',
+      options: { binding: 'MY_KV_NAMESPACE' },
+    }
+    ```
+
+    **File system (development only)**
+    ```typescript
+    driver: {
+      type: 'fs',
+      options: { base: './.sessions' },
+    }
+    ```
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Memory storage (`type: 'memory'`) is currently non-functional. Use Redis, Cloudflare KV, or file system.
+</Note>
+
+---
+
+### `UserHandler`
+
+Optional callbacks attached to `AnalogAuthConfig.userHandler` for customizing user data flow.
+
+<ResponseField name="createOrUpdateUser" type="(user: T) => Promise<any>">
+  Called after token exchange when a user logs in. Use this to persist the user to your database. The returned object is stored as `session.user`.
+
+  ```typescript
+  createOrUpdateUser: async (userInfo) => {
+    return db.users.upsert({
+      where: { sub: userInfo.sub },
+      update: { lastLogin: new Date() },
+      create: { sub: userInfo.sub, email: userInfo.email },
+    });
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="mapUserToLocal" type="(user: T) => Promise<any> | any">
+  Called when reading the user from an existing session. Use this to transform the stored user data into your application's shape.
+
+  ```typescript
+  mapUserToLocal: (userInfo) => ({
+    id: userInfo.sub,
+    name: userInfo.name,
+    email: userInfo.email,
+    roles: userInfo.realm_access?.roles || [],
+  })
+  ```
+</ResponseField>
+
+---
+
+## Built-in Routes
+
+`useAnalogAuth` automatically registers these routes under `/api/auth/`:
+
+| Method | Path | Auth Required | Description |
+|--------|------|:---:|-------------|
+| `GET` | `/api/auth/login` | No | Redirects to OAuth provider. Accepts `?redirect_uri=` for post-login redirect. |
+| `GET` | `/api/auth/callback` | No | Handles provider callback; exchanges authorization code for tokens. |
+| `GET` | `/api/auth/logout` | No | Revokes tokens, clears session, redirects to provider logout. |
+| `GET` | `/api/auth/authenticated` | No | Returns `{ authenticated: boolean }`. |
+| `GET` | `/api/auth/user` | Yes | Returns the authenticated user object. |
+| `GET` | `/api/auth/refresh-tokens` | API key | Bulk refresh of expiring tokens. Requires `Authorization: Bearer <tokenRefreshApiKey>`. |
+
+---
+
+## Route Protection
+
+`unprotectedRoutes` supports exact matches and wildcard patterns:
+
+| Pattern | Path | Matches? |
+|---------|------|:---:|
+| `'/'` | `/` | Yes |
+| `'/'` | `/home` | No |
+| `'/api/public/*'` | `/api/public/data` | Yes |
+| `'/api/public/*'` | `/api/public` | No — wildcard requires content after prefix |
+| `'/api/public/*'` | `/api/public/` | No — trailing slash alone does not count |
+
+Unauthenticated browser requests are redirected to `/api/auth/login`. Requests with a `fetch: 'true'` header (set by `authInterceptor`) receive a `401` instead.
+
+---
+
+## Token Refresh
+
+Three refresh strategies are implemented:
+
+1. **Lazy refresh** — When a request arrives with an expired token, the middleware attempts a refresh before returning `401`.
+2. **Proactive refresh** — If a token is within 5 minutes of expiry (`TOKEN_REFRESH_SAFETY_MARGIN = 300`), a background refresh fires without blocking the current request.
+3. **Scheduled refresh** — Configure a CRON job to call the bulk refresh endpoint:
+
+```bash
+# Every 4 minutes, refresh tokens expiring in the next 5 minutes
+curl -X GET https://your-app.com/api/auth/refresh-tokens \
+  -H "Authorization: Bearer YOUR_TOKEN_REFRESH_API_KEY"
+```
+
+The endpoint returns:
+```json
+{ "success": true, "refreshed": 12, "failed": 0, "total": 45 }
+```
+
+---
+
+## Error Responses
+
+| Scenario | Response |
+|----------|----------|
+| Missing mandatory config fields | `Error` thrown at middleware initialization |
+| Unauthenticated browser request | `302` redirect to `/api/auth/login` |
+| Unauthenticated API request (`fetch: 'true'`) | `401 Unauthorized` |
+| Invalid/missing OAuth state on callback | `400` — session may have expired |
+| Token refresh failure | `401` after retry with exponential backoff |
+| User lacks required roles (Angular client) | Redirect to `/access-denied` |

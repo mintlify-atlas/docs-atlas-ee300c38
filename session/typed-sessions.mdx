@@ -1,0 +1,189 @@
+---
+title: "Typed sessions"
+description: "Use TypeScript generics to get compile-time type safety for session data across all session functions."
+---
+
+All session functions accept a generic type parameter `<T>` that constrains the shape of session data. Passing a typed interface gives you autocompletion and compile-time safety when reading and writing session fields.
+
+## Defining a session interface
+
+Declare an interface that extends your session's data shape. All fields should be optional unless you always populate them via the `generate` callback.
+
+```typescript
+interface AppSession {
+  userId: string;
+  roles: string[];
+  preferences: {
+    theme: 'light' | 'dark';
+    language: string;
+  };
+  lastActivity: number;
+}
+```
+
+## Using generics with session functions
+
+Pass the interface as the type parameter to `useSession`, `getSession`, and `updateSession`:
+
+```typescript
+import { defineEventHandler } from 'h3';
+import { useSession, getSession, updateSession } from '@analog-tools/session';
+
+export default defineEventHandler(async (event) => {
+  await useSession<AppSession>(event, {
+    store,
+    secret: process.env['SESSION_SECRET']!,
+    generate: () => ({
+      userId: '',
+      roles: [],
+      preferences: { theme: 'light', language: 'en' },
+      lastActivity: Date.now(),
+    }),
+  });
+
+  const session = getSession<AppSession>(event);
+  // TypeScript knows: session.preferences.theme is 'light' | 'dark'
+
+  await updateSession<AppSession>(event, () => ({
+    lastActivity: Date.now(),
+  }));
+});
+```
+
+### `generate` callback
+
+The `generate` callback on `SessionConfig` runs once when a new session is created. Use it to set default values so that `getSession` always returns a fully populated object rather than an empty one:
+
+```typescript
+await useSession<AppSession>(event, {
+  store,
+  secret: process.env['SESSION_SECRET']!,
+  generate: () => ({
+    userId: '',
+    roles: [],
+    preferences: { theme: 'light', language: 'en' },
+    lastActivity: Date.now(),
+  }),
+});
+```
+
+<Note>
+  The `generate` callback runs for new sessions only. For returning visitors, session data is loaded from the store as-is, so always handle the case where optional fields may be absent.
+</Note>
+
+## Authentication flow example
+
+The following example shows a complete login, protected route, and logout flow using a typed `AuthSession` interface.
+
+```typescript
+import { defineEventHandler, readBody, createError } from 'h3';
+import {
+  useSession,
+  getSession,
+  updateSession,
+  destroySession,
+  regenerateSession,
+  createUnstorageStore,
+} from '@analog-tools/session';
+
+interface AuthSession {
+  userId?: string;
+  username?: string;
+  loginTime?: number;
+}
+
+const store = await createUnstorageStore({
+  type: 'redis',
+  options: { url: process.env['REDIS_URL']! },
+});
+
+const sessionConfig = {
+  store,
+  secret: process.env['SESSION_SECRET']!,
+  maxAge: 3600,
+  cookie: {
+    secure: process.env['NODE_ENV'] === 'production',
+    httpOnly: true,
+    sameSite: 'strict' as const,
+  },
+};
+```
+
+<CodeGroup>
+
+```typescript Login handler
+export const loginHandler = defineEventHandler(async (event) => {
+  await useSession<AuthSession>(event, sessionConfig);
+
+  const { username, password } = await readBody(event);
+  const user = await validateCredentials(username, password);
+
+  if (!user) {
+    throw createError({ statusCode: 401, statusMessage: 'Invalid credentials' });
+  }
+
+  // Prevent session fixation — generates a new session ID
+  await regenerateSession(event);
+
+  await updateSession<AuthSession>(event, () => ({
+    userId: user.id,
+    username: user.username,
+    loginTime: Date.now(),
+  }));
+
+  return { authenticated: true };
+});
+```
+
+```typescript Protected handler
+export const protectedHandler = defineEventHandler(async (event) => {
+  await useSession<AuthSession>(event, sessionConfig);
+
+  const session = getSession<AuthSession>(event);
+  if (!session?.userId) {
+    throw createError({ statusCode: 401, statusMessage: 'Not authenticated' });
+  }
+
+  return { user: { id: session.userId, username: session.username } };
+});
+```
+
+```typescript Logout handler
+export const logoutHandler = defineEventHandler(async (event) => {
+  await useSession<AuthSession>(event, sessionConfig);
+  await destroySession(event);
+  return { authenticated: false };
+});
+```
+
+</CodeGroup>
+
+<Tip>
+  Always call `regenerateSession` after a successful login. This assigns a new session ID to the authenticated user, preventing a session fixation attack where an attacker pre-sets a known session ID before the user logs in.
+</Tip>
+
+## Secret rotation strategy
+
+Rotate session secrets without invalidating active user sessions by passing an array to `secret`. The first element signs new sessions; all elements are tried when verifying existing cookies.
+
+```typescript
+// Step 1: Add the new secret as the first element.
+// Deploy this change — new sessions use 'new-secret-2025',
+// existing sessions signed with 'old-secret-2024' still work.
+const config = {
+  store,
+  secret: ['new-secret-2025', 'old-secret-2024'],
+};
+
+// Step 2: After one full maxAge interval has elapsed,
+// all cookies signed with the old secret have expired.
+// Remove the old secret from the array.
+const configAfterRotation = {
+  store,
+  secret: 'new-secret-2025',
+};
+```
+
+<Warning>
+  Do not remove an old secret until at least one `maxAge` interval has passed since you added the new secret. Removing it too early invalidates sessions for users who have not yet made a request under the new secret.
+</Warning>
